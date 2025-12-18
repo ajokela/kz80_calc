@@ -1,0 +1,22 @@
+[package]
+name = "kz80_calc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+authors = ["Alex Jokela"]
+description = "VisiCalc-style spreadsheet for Z80 - Retro computing on the RetroShield"
+license = "BSD-3-Clause"
+repository = "https://github.com/ajokela/kz80_calc"
+homepage = "https://github.com/ajokela/kz80_calc"
+readme = "README.md"
+keywords = ["z80", "spreadsheet", "visicalc", "retro", "calculator"]
+categories = ["compilers", "embedded"]
+exclude = [
+    "target/",
+    "*.bin",
+    "/tmp/",
+]
+
+[dependencies]
+
+[dev-dependencies]
