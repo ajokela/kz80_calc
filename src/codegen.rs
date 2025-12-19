@@ -7,45 +7,62 @@
 //!   0x0000-0x00FF  Startup, vectors
 //!   0x0100-0x1FFF  Spreadsheet engine
 //!
-//! RAM (6KB):
-//!   0x2000-0x2FFF  Cell data (4KB = 1024 cells × 4 bytes)
-//!   0x3000-0x30FF  Input buffer (256 bytes)
-//!   0x3100-0x31FF  Display line buffer (256 bytes)
-//!   0x3200-0x35FF  Formula parse buffer, scratch (1KB)
-//!   0x3600-0x37FF  Stack (512 bytes)
+//! RAM (8KB):
+//!   0x2000-0x37FF  Cell data (6KB = 1024 cells x 6 bytes)
+//!   0x3800-0x38FF  Input buffer (256 bytes)
+//!   0x3900-0x39FF  Display line buffer (256 bytes)
+//!   0x3A00-0x3DFF  Formula parse buffer, scratch (1KB)
+//!   0x3E00-0x3FFF  Stack (512 bytes)
 //!
-//! Cell format (4 bytes):
-//!   byte 0: type (0=empty, 1=number, 2=formula, 3=error)
-//!   byte 1: flags (dirty, etc.)
-//!   bytes 2-3: value (16-bit signed integer) or formula offset
+//! Cell format (6 bytes) - 8-digit packed BCD:
+//!   byte 0: type (0=empty, 1=number, 2=formula, 3=error, 4=repeat, 5=label)
+//!   byte 1: sign (0x00=positive, 0x80=negative)
+//!   bytes 2-5: 8-digit packed BCD (big-endian: d7d6 d5d4 d3d2 d1d0)
 
 use std::ops::{Deref, DerefMut};
 use retroshield_z80_workbench::CodeGen;
 
 /// Memory constants
-const STACK_TOP: u16 = 0x37FF;
+const STACK_TOP: u16 = 0x3FFF;
 
 // RAM layout
-const CELL_DATA: u16 = 0x2000;      // 4KB for cells
-const INPUT_BUF: u16 = 0x3000;      // 256 bytes
-const SCRATCH: u16 = 0x3200;        // 1KB scratch/formula
+const CELL_DATA: u16 = 0x2000;      // 6KB for cells (1024 x 6 bytes)
+const INPUT_BUF: u16 = 0x3800;      // 256 bytes
+const SCRATCH: u16 = 0x3A00;        // 1KB scratch/formula
 
-// Spreadsheet state
-const CURSOR_COL: u16 = 0x35F0;     // Current column (0-15)
-const CURSOR_ROW: u16 = 0x35F1;     // Current row (0-63)
-const VIEW_TOP: u16 = 0x35F2;       // Top visible row
-const VIEW_LEFT: u16 = 0x35F3;      // Left visible column
-const INPUT_LEN: u16 = 0x35F4;      // Input buffer length
-const INPUT_POS: u16 = 0x35F5;      // Input cursor position
-const EDIT_MODE: u16 = 0x35F6;      // 0=navigate, 1=edit
-const TEMP1: u16 = 0x35F8;          // Temp storage
-const TEMP2: u16 = 0x35FA;          // Temp storage
-const FORMULA_PTR: u16 = 0x35FC;    // Next free position in formula storage
-const COL_WIDTH_VAR: u16 = 0x35FF;  // Column width (default 9)
-const RANGE_ROW2: u16 = 0x3600;     // Range function end row
-const FUNC_TYPE: u16 = 0x3601;      // Function type: 0=SUM, 1=AVG, 2=MIN, 3=MAX, 4=COUNT
-const FUNC_COUNT: u16 = 0x3602;     // Cell count for AVG
-const FUNC_MINMAX: u16 = 0x3604;    // Min/max accumulator (16-bit)
+// Cell size for BCD
+const CELL_SIZE: u8 = 6;            // 6 bytes per cell
+
+// Spreadsheet state (in scratch area, above formula storage)
+const CURSOR_COL: u16 = 0x3DF0;     // Current column (0-15)
+const CURSOR_ROW: u16 = 0x3DF1;     // Current row (0-63)
+const VIEW_TOP: u16 = 0x3DF2;       // Top visible row
+const VIEW_LEFT: u16 = 0x3DF3;      // Left visible column
+const INPUT_LEN: u16 = 0x3DF4;      // Input buffer length
+const INPUT_POS: u16 = 0x3DF5;      // Input cursor position
+const EDIT_MODE: u16 = 0x3DF6;      // 0=navigate, 1=edit
+const TEMP1: u16 = 0x3DF8;          // Temp storage
+const TEMP2: u16 = 0x3DFA;          // Temp storage
+const FORMULA_PTR: u16 = 0x3DFC;    // Next free position in formula storage
+const COL_WIDTH_VAR: u16 = 0x3DFE;  // Column width (default 9)
+const RANGE_ROW2: u16 = 0x3DE0;     // Range function end row
+const RANGE_COL2: u16 = 0x3DDA;     // Range function end column
+const RANGE_CUR_COL: u16 = 0x3DDB;  // Current column in range iteration
+const SIGN_ACCUM: u16 = 0x3DDC;     // Sign of formula accumulator (0x00=pos, 0x80=neg)
+const SIGN_OP: u16 = 0x3DDD;        // Sign of current operand
+const FUNC_TYPE: u16 = 0x3DE1;      // Function type: 0=SUM, 1=AVG, 2=MIN, 3=MAX, 4=COUNT
+const FUNC_COUNT: u16 = 0x3DE2;     // Cell count for AVG
+const FUNC_MINMAX: u16 = 0x3DE4;    // Min/max accumulator (16-bit)
+const FUNC_SIGN: u16 = 0x3DE6;      // Sign of function accumulator (0x00=pos, 0x80=neg)
+const FUNC_SIGN2: u16 = 0x3DE7;     // Sign of current cell value in function
+
+// BCD working storage (in scratch area, before state variables)
+const BCD_TEMP1: u16 = 0x3DC0;      // 4-byte BCD temp
+const BCD_TEMP2: u16 = 0x3DC4;      // 4-byte BCD temp
+const BCD_ACCUM: u16 = 0x3DC8;      // 8-byte BCD accumulator for mul (ends at 0x3DCF)
+const ATOB_FLAGS: u16 = 0x3DD0;     // 2 bytes: [0]=decimal seen flag, [1]=frac digit count
+const FUNC_BCD: u16 = 0x3DD2;       // 4-byte BCD for function SUM/MIN/MAX accumulator
+const FUNC_BCD2: u16 = 0x3DD6;      // 4-byte BCD temp for cell value in functions
 
 // Display constants
 const CELL_WIDTH: u8 = 9;           // Width per cell display
@@ -111,6 +128,7 @@ impl SpreadsheetCodeGen {
         self.emit_display();
         self.emit_input();
         self.emit_cell_ops();
+        self.emit_bcd_ops();
         self.emit_formula();
         self.emit_io();
         self.emit_strings();
@@ -149,7 +167,7 @@ impl SpreadsheetCodeGen {
 
         // Clear all cells
         self.ld_hl(CELL_DATA);
-        self.ld_bc(4096); // 1024 cells × 4 bytes
+        self.ld_bc(6144); // 1024 cells × 6 bytes
         self.label("clear_cells_loop");
         self.emit(&[0x36, 0x00]); // LD (HL), 0
         self.inc_hl();
@@ -989,11 +1007,18 @@ impl SpreadsheetCodeGen {
         self.emit(&[0xC2]); // JP NZ, recalc_find_end
         self.fixup("recalc_find_end");
         // DE now points to value storage location
-        // Store new value (HL) at (DE)
-        self.ex_de_hl(); //HL = storage ptr, DE = value)
-        self.emit(&[0x73]); // LD (HL), E
+        // Store new BCD value (4 bytes from BCD_TEMP1) at (DE)
+        self.ex_de_hl(); //HL = storage ptr)
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("recalc_store_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x77]); // LD (HL), A
         self.inc_hl();
-        self.emit(&[0x72]); // LD (HL), D
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ recalc_store_loop
+        self.emit_relative("recalc_store_loop");
 
         // Restore cell pointer high byte position
         self.pop_hl();
@@ -1001,7 +1026,9 @@ impl SpreadsheetCodeGen {
         self.label("recalc_next");
         self.pop_de(); //restore counter)
         self.pop_hl(); //restore cell pointer)
-        // Move to next cell (4 bytes)
+        // Move to next cell (6 bytes)
+        self.inc_hl();
+        self.inc_hl();
         self.inc_hl();
         self.inc_hl();
         self.inc_hl();
@@ -1374,16 +1401,29 @@ impl SpreadsheetCodeGen {
         self.ret();
 
         self.label("print_cell_number");
-        // Get value from bytes 2-3
+        // Cell format: byte 0 = type, byte 1 = sign, bytes 2-5 = BCD
         self.inc_hl();
+        self.emit(&[0x4E]); // LD C, (HL) (save sign)
         self.inc_hl();
-        self.emit(&[0x5E]); // LD E, (HL)
+        // Copy 4 BCD bytes to BCD_TEMP1
+        self.push_bc(); // save sign
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("load_bcd_loop");
+        self.ld_a_hl_ind();
+        self.emit(&[0x12]); // LD (DE), A
         self.inc_hl();
-        self.emit(&[0x56]); // LD D, (HL)
-        self.ex_de_hl();
-        // HL = value, print right-aligned
-        self.emit(&[0xCD]); // CALL print_int_cell
-        self.fixup("print_int_cell");
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ load_bcd_loop
+        self.emit_relative("load_bcd_loop");
+        // Convert BCD to ASCII
+        self.emit(&[0xCD]); // CALL bcd_to_ascii
+        self.fixup("bcd_to_ascii");
+        // Print with sign and padding
+        self.pop_bc(); // restore sign in C
+        self.emit(&[0xCD]); // CALL print_bcd_cell_signed
+        self.fixup("print_bcd_cell_signed");
         self.ret();
 
         self.label("print_cell_error");
@@ -1393,7 +1433,7 @@ impl SpreadsheetCodeGen {
         self.fixup("print_string");
         self.ret();
 
-        // Formula cell - get pointer and read calculated value
+        // Formula cell - get pointer and read sign + BCD value
         self.label("print_cell_formula");
         // HL points to cell, bytes 2-3 have formula pointer
         self.inc_hl();
@@ -1409,13 +1449,28 @@ impl SpreadsheetCodeGen {
         self.or_a_a();
         self.emit(&[0xC2]); // JP NZ, find_formula_value
         self.fixup("find_formula_value");
-        // HL now points to calculated value (2 bytes after null)
-        self.emit(&[0x5E]); // LD E, (HL)
+        // HL now points to sign byte, then 4 BCD bytes
+        self.ld_a_hl_ind(); // load sign
+        self.ld_c_a(); // save sign in C
+        self.inc_hl(); // point to BCD
+        // Copy BCD to BCD_TEMP1
+        self.push_bc(); // save sign
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("load_formula_bcd");
+        self.ld_a_hl_ind();
+        self.emit(&[0x12]); // LD (DE), A
         self.inc_hl();
-        self.emit(&[0x56]); // LD D, (HL)
-        self.ex_de_hl(); //HL = value)
-        self.emit(&[0xCD]); // CALL print_int_cell
-        self.fixup("print_int_cell");
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("load_formula_bcd");
+        // Convert to ASCII and print with sign
+        self.emit(&[0xCD]); // CALL bcd_to_ascii
+        self.fixup("bcd_to_ascii");
+        self.pop_bc(); // restore sign in C
+        self.emit(&[0xCD]); // CALL print_bcd_cell_signed
+        self.fixup("print_bcd_cell_signed");
         self.ret();
 
         // Print repeating character cell
@@ -1520,15 +1575,51 @@ impl SpreadsheetCodeGen {
         self.emit(&[0xFE, CELL_NUMBER]); // CP CELL_NUMBER
         self.emit(&[0xC2]); // JP NZ, print_content_formula
         self.fixup("print_content_formula");
-        // Number - print value
+        // Number - print BCD value with sign
+        self.inc_hl(); // skip type
+        self.emit(&[0x4E]); // LD C, (HL) (save sign)
         self.inc_hl();
+        // Copy 4 BCD bytes to BCD_TEMP1
+        self.push_bc(); // save sign
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("load_status_bcd");
+        self.ld_a_hl_ind();
+        self.emit(&[0x12]); // LD (DE), A
         self.inc_hl();
-        self.emit(&[0x5E]); // LD E, (HL)
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("load_status_bcd");
+        // Convert to ASCII
+        self.emit(&[0xCD]); // CALL bcd_to_ascii
+        self.fixup("bcd_to_ascii");
+        // Check sign and print minus if negative
+        self.pop_bc(); // restore sign in C
+        self.ld_a_c();
+        self.or_a_a();
+        self.emit(&[0xCA]); // JP Z, status_skip_zeros (positive)
+        self.fixup("status_skip_zeros");
+        // Negative - print minus sign first
+        self.emit(&[0x3E, b'-']); // LD A, '-'
+        self.emit(&[0xCD]); // CALL putchar
+        self.fixup("putchar");
+        // Print INPUT_BUF, skipping leading zeros
+        self.label("status_skip_zeros");
+        self.emit(&[0x21]); // LD HL, INPUT_BUF
+        self.emit_word(INPUT_BUF);
+        self.emit(&[0x06, 7]); // LD B, 7 (skip up to 7 leading zeros)
+        self.label("status_skip_zeros_loop");
+        self.ld_a_hl_ind();
+        self.emit(&[0xFE, b'0']); // CP '0'
+        self.emit(&[0xC2]); // JP NZ, status_print_num
+        self.fixup("status_print_num");
         self.inc_hl();
-        self.emit(&[0x56]); // LD D, (HL)
-        self.ex_de_hl();
-        self.emit(&[0xCD]); // CALL print_int
-        self.fixup("print_int");
+        self.emit(&[0x10]); // DJNZ status_skip_zeros_loop
+        self.emit_relative("status_skip_zeros_loop");
+        self.label("status_print_num");
+        self.emit(&[0xCD]); // CALL print_string
+        self.fixup("print_string");
         self.ret();
 
         self.label("print_content_formula");
@@ -1610,11 +1701,11 @@ impl SpreadsheetCodeGen {
         // Otherwise parse as number
         self.emit(&[0xCD]); // CALL parse_number
         self.fixup("parse_number");
-        // HL = parsed number, carry set if error
+        // C = sign, BCD value in BCD_TEMP1, carry set if error
         self.emit(&[0xDA]); // JP C, store_error
         self.fixup("store_error");
-        // Store as number in current cell
-        self.push_hl(); //save value)
+        // Store as number in current cell (6 bytes: type, sign, 4 BCD bytes)
+        self.push_bc(); // save sign in C
         self.emit(&[0x3A]); // LD A, (CURSOR_COL)
         self.emit_word(CURSOR_COL);
         self.ld_b_a();
@@ -1623,14 +1714,22 @@ impl SpreadsheetCodeGen {
         self.ld_c_a();
         self.emit(&[0xCD]); // CALL get_cell_addr
         self.fixup("get_cell_addr");
-        self.emit(&[0x36, CELL_NUMBER]); // LD (HL), CELL_NUMBER
+        self.emit(&[0x36, CELL_NUMBER]); // LD (HL), CELL_NUMBER (byte 0: type)
         self.inc_hl();
-        self.emit(&[0x36, 0x00]); // LD (HL), 0 (flags)
+        self.pop_bc(); // restore sign
+        self.emit(&[0x71]); // LD (HL), C (byte 1: sign)
         self.inc_hl();
-        self.pop_de(); //value)
-        self.emit(&[0x73]); // LD (HL), E
+        // Copy 4 BCD bytes from BCD_TEMP1 to cell
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("store_num_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x77]); // LD (HL), A
         self.inc_hl();
-        self.emit(&[0x72]); // LD (HL), D
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ store_num_loop
+        self.emit_relative("store_num_loop");
         self.ret();
 
         self.label("store_error");
@@ -1770,30 +1869,23 @@ impl SpreadsheetCodeGen {
         self.emit_word(INPUT_POS);
         self.ret();
 
-        // Parse number from INPUT_BUF
-        // Returns value in HL, carry set on error
+        // Parse number from INPUT_BUF to BCD
+        // Returns: C = sign (0x00 = positive, 0x80 = negative)
+        // BCD value is stored in BCD_TEMP1, carry set on error
         self.label("parse_number");
-        self.emit(&[0x21, 0x00, 0x00]); // LD HL, 0 (accumulator)
-        self.emit(&[0x11]); // LD DE, INPUT_BUF
+        self.emit(&[0x0E, 0x00]); // LD C, 0 (positive)
+        self.emit(&[0x21]); // LD HL, INPUT_BUF
         self.emit_word(INPUT_BUF);
-        self.emit(&[0x3A]); // LD A, (INPUT_LEN)
-        self.emit_word(INPUT_LEN);
-        self.ld_b_a(); //counter)
-        self.emit(&[0x0E, 0x00]); // LD C, 0 (negative flag)
 
         // Check for minus sign
-        self.emit(&[0x1A]); // LD A, (DE)
+        self.ld_a_hl_ind();
         self.emit(&[0xFE, b'-']);
-        self.emit(&[0xC2]); // JP NZ, parse_num_loop
-        self.fixup("parse_num_loop");
-        self.emit(&[0x0E, 0x01]); // LD C, 1 (negative)
-        self.inc_de();
-        self.dec_b();
-        self.emit(&[0xCA]); // JP Z, parse_num_error (just "-")
-        self.fixup("parse_num_error");
+        self.emit(&[0x20, 0x03]); // JR NZ, +3 (skip sign handling: 2 bytes + 1 byte)
+        self.emit(&[0x0E, 0x80]); // LD C, 0x80 (negative) - 2 bytes
+        self.inc_hl(); // skip minus sign - 1 byte
 
-        self.label("parse_num_loop");
-        self.emit(&[0x1A]); // LD A, (DE)
+        // Validate at least one digit exists
+        self.ld_a_hl_ind();
         self.emit(&[0xFE, b'0']);
         self.emit(&[0xDA]); // JP C, parse_num_error
         self.fixup("parse_num_error");
@@ -1801,48 +1893,11 @@ impl SpreadsheetCodeGen {
         self.emit(&[0xD2]); // JP NC, parse_num_error
         self.fixup("parse_num_error");
 
-        // Save buffer pointer and digit value
-        self.push_de(); //save buffer ptr)
-        self.emit(&[0xD6, b'0']); // SUB '0' (convert to value)
-        self.push_af(); //save digit)
-
-        // Multiply HL by 10: HL = HL*2 + HL*8
-        self.add_hl_hl(); //*2)
-        self.emit(&[0x54]); // LD D, H
-        self.emit(&[0x5D]); // LD E, L (DE = HL*2)
-        self.add_hl_hl(); //*4)
-        self.add_hl_hl(); //*8)
-        self.add_hl_de(); //*8 + *2 = *10)
-
-        // Add digit
-        self.pop_af(); //restore digit)
-        self.ld_e_a();
-        self.emit(&[0x16, 0x00]); // LD D, 0
-        self.add_hl_de();
-
-        // Move to next character
-        self.pop_de(); //restore buffer ptr)
-        self.inc_de();
-        self.dec_b();
-        self.emit(&[0xC2]); // JP NZ, parse_num_loop
-        self.fixup("parse_num_loop");
-
-        // Check negative flag
-        self.ld_a_c();
-        self.or_a_a();
-        self.emit(&[0xCA]); // JP Z, parse_num_done
-        self.fixup("parse_num_done");
-        // Negate HL
-        self.emit(&[0x7C]); // LD A, H
-        self.cpl();
-        self.emit(&[0x67]); // LD H, A
-        self.emit(&[0x7D]); // LD A, L
-        self.cpl();
-        self.emit(&[0x6F]); // LD L, A
-        self.inc_hl();
-
-        self.label("parse_num_done");
-        self.or_a_a(); //clear carry)
+        // Call ascii_to_bcd (HL points to digit string)
+        self.emit(&[0xCD]); // CALL ascii_to_bcd
+        self.fixup("ascii_to_bcd");
+        // BCD value now in BCD_TEMP1
+        self.or_a_a(); // clear carry
         self.ret();
 
         self.label("parse_num_error");
@@ -1855,7 +1910,7 @@ impl SpreadsheetCodeGen {
         // Get cell address from B=col, C=row
         // Returns address in HL
         self.label("get_cell_addr");
-        // Address = CELL_DATA + (row * 16 + col) * 4
+        // Address = CELL_DATA + (row * 16 + col) * 6
         // Use 16-bit arithmetic to avoid overflow when row >= 16
         self.emit(&[0x69]); // LD L, C (row)
         self.emit(&[0x26, 0x00]); // LD H, 0 (HL = row, 16-bit)
@@ -1866,8 +1921,12 @@ impl SpreadsheetCodeGen {
         self.emit(&[0x58]); // LD E, B (col)
         self.emit(&[0x16, 0x00]); // LD D, 0 (DE = col, 16-bit)
         self.add_hl_de(); // HL = row*16 + col
+        // Multiply by 6: HL * 6 = HL * 4 + HL * 2
         self.add_hl_hl(); // x2
+        self.push_hl(); // save x2
         self.add_hl_hl(); // x4
+        self.pop_de(); // DE = x2
+        self.add_hl_de(); // HL = x4 + x2 = x6
         // Add base address
         self.emit(&[0x11]); // LD DE, CELL_DATA
         self.emit_word(CELL_DATA);
@@ -1877,6 +1936,650 @@ impl SpreadsheetCodeGen {
         // Recalculate all formula cells
         self.label("recalculate");
         // For now, just a stub - formulas store their calculated value
+        self.ret();
+    }
+
+    /// BCD arithmetic operations (8-digit packed BCD)
+    fn emit_bcd_ops(&mut self) {
+        // BCD values are stored big-endian: d7d6 d5d4 d3d2 d1d0
+        // Sign is separate (byte 1 of cell: 0x00=positive, 0x80=negative)
+
+        // bcd_add: Add BCD at (DE) to BCD at (HL), result at (HL)
+        // Both point to 4-byte BCD data, carry returned if overflow
+        self.label("bcd_add");
+        // Work from LSB (byte 3) to MSB (byte 0)
+        self.emit(&[0x23]); // INC HL (point to byte 1)
+        self.emit(&[0x23]); // INC HL (point to byte 2)
+        self.emit(&[0x23]); // INC HL (point to byte 3, LSB)
+        self.emit(&[0x13]); // INC DE
+        self.emit(&[0x13]); // INC DE
+        self.emit(&[0x13]); // INC DE (DE points to LSB)
+        self.emit(&[0x06, 4]); // LD B, 4 (4 bytes)
+        self.or_a_a(); // clear carry
+        self.label("bcd_add_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x8E]); // ADC A, (HL)
+        self.emit(&[0x27]); // DAA
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0x1B]); // DEC DE
+        self.emit(&[0x10]); // DJNZ bcd_add_loop
+        self.emit_relative("bcd_add_loop");
+        self.ret();
+
+        // bcd_sub: Subtract BCD at (DE) from BCD at (HL), result at (HL)
+        // Computes: (HL) = (HL) - (DE)
+        // Uses Z80 SBC + DAA which works for BCD when N flag is set
+        self.label("bcd_sub");
+        // Work from LSB to MSB
+        self.emit(&[0x23]); // INC HL x3 to point to LSB (byte 3)
+        self.emit(&[0x23]);
+        self.emit(&[0x23]);
+        self.emit(&[0x13]); // INC DE x3
+        self.emit(&[0x13]);
+        self.emit(&[0x13]);
+        self.emit(&[0x06, 4]); // LD B, 4 (4 bytes)
+        self.or_a_a(); // clear carry (no initial borrow)
+        self.label("bcd_sub_loop");
+        // Load subtrahend, save it, load minuend, subtract, adjust
+        self.emit(&[0x1A]); // LD A, (DE) = subtrahend
+        self.emit(&[0x4F]); // LD C, A = save subtrahend in C
+        self.emit(&[0x7E]); // LD A, (HL) = minuend
+        self.emit(&[0x99]); // SBC A, C = minuend - subtrahend - borrow
+        self.emit(&[0x27]); // DAA (works after SBC since N flag is set)
+        self.emit(&[0x77]); // LD (HL), A = store result
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0x1B]); // DEC DE
+        self.emit(&[0x10]); // DJNZ bcd_sub_loop
+        self.emit_relative("bcd_sub_loop");
+        self.ret();
+
+        // bcd_cmp: Compare BCD at (HL) with BCD at (DE)
+        // Returns: Z if equal, C if (HL) < (DE)
+        self.label("bcd_cmp");
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("bcd_cmp_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0xBE]); // CP (HL)
+        self.emit(&[0xC0]); // RET NZ (return with flags set)
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x13]); // INC DE
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("bcd_cmp_loop");
+        self.ret(); // Z set if equal
+
+        // bcd_zero: Zero 4-byte BCD at (HL)
+        self.label("bcd_zero");
+        self.emit(&[0xAF]);
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x77]);
+        self.emit(&[0x23]);
+        self.emit(&[0x77]);
+        self.emit(&[0x23]);
+        self.emit(&[0x77]);
+        self.ret();
+
+        // bcd_copy: Copy 4-byte BCD from (DE) to (HL)
+        self.label("bcd_copy");
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("bcd_copy_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x13]); // INC DE
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("bcd_copy_loop");
+        self.ret();
+
+        // signed_add: Signed BCD addition (callable subroutine version)
+        // Input: BCD_TEMP2 + BCD_TEMP1, SIGN_ACCUM = sign of TEMP2, SIGN_OP = sign of TEMP1
+        // Output: Result in BCD_TEMP1, sign in SIGN_ACCUM
+        self.label("signed_add");
+        // Check if signs are the same
+        self.emit(&[0x3A]); // LD A, (SIGN_ACCUM)
+        self.emit_word(SIGN_ACCUM);
+        self.ld_b_a();
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0xB8]); // CP B
+        self.emit(&[0xCA]); // JP Z, signed_add_same
+        self.fixup("signed_add_same");
+
+        // Different signs: subtract smaller magnitude from larger
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_cmp (C set if TEMP2 < TEMP1)
+        self.fixup("bcd_cmp");
+        self.emit(&[0xDA]); // JP C, signed_add_op_larger
+        self.fixup("signed_add_op_larger");
+
+        // TEMP2 >= TEMP1: result = TEMP2 - TEMP1, sign = SIGN_ACCUM
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_sub
+        self.fixup("bcd_sub");
+        // Copy result from TEMP2 to TEMP1
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        self.ret();
+
+        // TEMP1 > TEMP2: result = TEMP1 - TEMP2, sign = SIGN_OP
+        self.label("signed_add_op_larger");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_sub
+        self.fixup("bcd_sub");
+        // Set sign to SIGN_OP
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0x32]); // LD (SIGN_ACCUM), A
+        self.emit_word(SIGN_ACCUM);
+        self.ret();
+
+        // Same signs: add magnitudes, keep sign
+        self.label("signed_add_same");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_add
+        self.fixup("bcd_add");
+        self.ret();
+
+        // bcd_mul: Multiply BCD at BCD_TEMP1 by BCD at BCD_TEMP2
+        // Result in BCD_TEMP1 (only lower 8 digits kept)
+        // Algorithm: Process multiplier from MSB to LSB
+        //   For each digit: shift accumulator left, then add (multiplicand × digit)
+        self.label("bcd_mul");
+        // Clear accumulator (8 bytes for intermediate result)
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0x06, 8]); // LD B, 8
+        self.emit(&[0xAF]);
+        self.label("bcd_mul_clr");
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("bcd_mul_clr");
+
+        // Process multiplier from MSB to LSB (8 digits = 4 bytes)
+        self.emit(&[0x0E, 8]); // LD C, 8 (digit counter)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2 (MSB first)
+        self.emit_word(BCD_TEMP2);
+
+        self.label("bcd_mul_digit");
+        // Get multiplier digit (high nibble first, then low)
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0x0F]); // RRCA x4 (rotate high nibble to low)
+        self.emit(&[0x0F]);
+        self.emit(&[0x0F]);
+        self.emit(&[0x0F]);
+        self.emit(&[0xE6, 0x0F]); // AND 0x0F (high digit)
+        self.push_hl();
+        self.push_bc();
+        self.emit(&[0xCD]); // CALL bcd_mul_by_digit
+        self.fixup("bcd_mul_by_digit");
+        self.pop_bc();
+        self.pop_hl();
+        self.dec_c();
+        self.emit(&[0xCA]); // JP Z, bcd_mul_done
+        self.fixup("bcd_mul_done");
+
+        // Low nibble
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0xE6, 0x0F]); // AND 0x0F (low digit)
+        self.push_hl();
+        self.push_bc();
+        self.emit(&[0xCD]); // CALL bcd_mul_by_digit
+        self.fixup("bcd_mul_by_digit");
+        self.pop_bc();
+        self.pop_hl();
+        self.emit(&[0x23]); // INC HL (next byte of multiplier)
+        self.dec_c();
+        self.emit(&[0xC2]); // JP NZ, bcd_mul_digit
+        self.fixup("bcd_mul_digit");
+
+        self.label("bcd_mul_done");
+        // Scale result by ÷100 for fixed-point (2 decimal places)
+        // Shift 8-byte accumulator right by 2 BCD digits (1 byte)
+        // This is needed because: cents × cents = cents², divide by 100 to get cents
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM+7 (destination)
+        self.emit_word(BCD_ACCUM + 7);
+        self.emit(&[0x11]); // LD DE, BCD_ACCUM+6 (source)
+        self.emit_word(BCD_ACCUM + 6);
+        self.emit(&[0x06, 7]); // LD B, 7 (copy 7 bytes)
+        self.label("bcd_shr_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0x1B]); // DEC DE
+        self.emit(&[0x10]); // DJNZ bcd_shr_loop
+        self.emit_relative("bcd_shr_loop");
+        // Clear byte 0 (MSB)
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.xor_a();
+        self.emit(&[0x77]); // LD (HL), A
+
+        // Copy lower 4 bytes of accumulator to BCD_TEMP1
+        self.emit(&[0x11]); // LD DE, BCD_ACCUM+4
+        self.emit_word(BCD_ACCUM + 4);
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        self.ret();
+
+        // bcd_mul_by_digit: Shift accumulator left, then add BCD_TEMP1 × digit to accumulator
+        // A = single digit (0-9)
+        self.label("bcd_mul_by_digit");
+        self.push_af();
+        // Shift accumulator left by one BCD digit (×10)
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0xCD]); // CALL bcd_shift_left
+        self.fixup("bcd_shift_left");
+        self.pop_af();
+        // Now add BCD_TEMP1 × digit to accumulator
+        self.or_a_a();
+        self.ret_z(); // multiplying by 0 adds nothing
+        self.emit(&[0x47]); // LD B, A (digit count for repeated addition)
+        self.label("bcd_mul_add_loop");
+        self.push_bc(); // Save B (digit counter) - bcd_add uses B internally
+        // Add BCD_TEMP1 to accumulator at current position
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM+4 (lower 4 bytes)
+        self.emit_word(BCD_ACCUM + 4);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_add
+        self.fixup("bcd_add");
+        self.pop_bc(); // Restore digit counter
+        self.emit(&[0x10]); // DJNZ bcd_mul_add_loop
+        self.emit_relative("bcd_mul_add_loop");
+        self.ret();
+
+        // bcd_shift_left: Shift 8-byte BCD at (HL) left by one digit (×10)
+        // Start from LSB (byte 7), shift nibbles toward MSB
+        self.label("bcd_shift_left");
+        self.emit(&[0x11, 7, 0]); // LD DE, 7 (offset to LSB)
+        self.add_hl_de(); // HL points to byte 7 (LSB)
+        self.emit(&[0x06, 8]); // LD B, 8
+        self.emit(&[0xAF]); // carry nibble = 0
+        self.label("bcd_shl_loop");
+        self.emit(&[0x4F]); // LD C, A (save carry nibble from previous byte)
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0x57]); // LD D, A (save original)
+        // Shift left 4 bits: low nibble becomes high, carry becomes low
+        self.emit(&[0x07]); // RLCA x4
+        self.emit(&[0x07]);
+        self.emit(&[0x07]);
+        self.emit(&[0x07]);
+        self.emit(&[0xE6, 0xF0]); // AND 0xF0 (shifted low nibble is now high)
+        self.emit(&[0xB1]); // OR C (carry from previous becomes low)
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x7A]); // LD A, D (original value)
+        self.emit(&[0xE6, 0xF0]); // AND 0xF0 (high nibble of original)
+        self.emit(&[0x0F]); // RRCA x4 (move to low position for carry)
+        self.emit(&[0x0F]);
+        self.emit(&[0x0F]);
+        self.emit(&[0x0F]);
+        self.emit(&[0x2B]); // DEC HL (move toward MSB)
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("bcd_shl_loop");
+        self.ret();
+
+        // bcd_div: Divide BCD at BCD_TEMP1 by BCD at BCD_TEMP2
+        // Quotient in BCD_TEMP1, uses repeated subtraction
+        self.label("bcd_div");
+        // Check for divide by zero
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0x23]);
+        self.emit(&[0xB6]); // OR (HL)
+        self.emit(&[0x23]);
+        self.emit(&[0xB6]); // OR (HL)
+        self.emit(&[0x23]);
+        self.emit(&[0xB6]); // OR (HL)
+        self.emit(&[0xC2]); // JP NZ, bcd_div_ok
+        self.fixup("bcd_div_ok");
+        self.emit(&[0x37]); // SCF (divide by zero)
+        self.ret();
+
+        self.label("bcd_div_ok");
+        // Scale dividend by ×100 for fixed-point (2 decimal places)
+        // Shift BCD_TEMP1 left by 2 BCD digits (1 byte)
+        // This is needed because: cents / cents = dimensionless, multiply by 100 to get cents
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1 (destination)
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1+1 (source)
+        self.emit_word(BCD_TEMP1 + 1);
+        self.emit(&[0x06, 3]); // LD B, 3 (copy 3 bytes)
+        self.label("bcd_div_shl_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x13]); // INC DE
+        self.emit(&[0x10]); // DJNZ bcd_div_shl_loop
+        self.emit_relative("bcd_div_shl_loop");
+        // Clear last byte (LSB) with zeros
+        self.xor_a();
+        self.emit(&[0x77]); // LD (HL), A
+
+        // Entry point for division without ×100 scaling (used by AVG)
+        self.label("bcd_div_noscale");
+        // Clear quotient accumulator
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM+4
+        self.emit_word(BCD_ACCUM + 4);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+
+        // Repeated subtraction: while BCD_TEMP1 >= BCD_TEMP2, subtract and increment quotient
+        self.label("bcd_div_loop");
+        // Compare BCD_TEMP1 with BCD_TEMP2
+        // bcd_cmp returns C if (DE) < (HL), so swap args to get C when TEMP1 < TEMP2
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_cmp
+        self.fixup("bcd_cmp");
+        self.emit(&[0xDA]); // JP C, bcd_div_done (TEMP1 < TEMP2)
+        self.fixup("bcd_div_done2");
+
+        // Subtract: BCD_TEMP1 -= BCD_TEMP2
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_sub
+        self.fixup("bcd_sub");
+
+        // Increment quotient (BCD_ACCUM, lower 4 bytes)
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM+7 (LSB)
+        self.emit_word(BCD_ACCUM + 7);
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0xC6, 0x01]); // ADD A, 1
+        self.emit(&[0x27]); // DAA
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x30]); // JR NC, bcd_div_loop (no carry, continue)
+        self.emit_relative("bcd_div_loop");
+        // Propagate carry through quotient
+        self.emit(&[0x06, 3]); // LD B, 3 (3 more bytes)
+        self.label("bcd_div_carry");
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0xCE, 0x00]); // ADC A, 0
+        self.emit(&[0x27]); // DAA
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x30]); // JR NC, bcd_div_loop
+        self.emit_relative("bcd_div_loop");
+        self.emit(&[0x10]); // DJNZ bcd_div_carry
+        self.emit_relative("bcd_div_carry");
+        self.emit(&[0xC3]); // JP bcd_div_loop
+        self.fixup("bcd_div_loop");
+
+        self.label("bcd_div_done2");
+        // Copy quotient to BCD_TEMP1
+        self.emit(&[0x11]); // LD DE, BCD_ACCUM+4
+        self.emit_word(BCD_ACCUM + 4);
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        self.or_a_a(); // clear carry (success)
+        self.ret();
+
+        // ascii_to_bcd: Convert ASCII string at (HL) to packed BCD at BCD_TEMP1
+        // Input: HL = pointer to null-terminated ASCII digits
+        // Handles leading minus sign and decimal point (2 fixed decimal places)
+        // Examples: "123.45" -> 12345, "123" -> 12300, "0.5" -> 50
+        self.label("ascii_to_bcd");
+        // Clear BCD_TEMP1
+        self.push_hl();
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        self.pop_hl();
+
+        // Initialize: ATOB_FLAGS[0] = 0xFF (no decimal seen), ATOB_FLAGS[1] = 0 (frac digit count)
+        self.emit(&[0x3E, 0xFF]); // LD A, 0xFF
+        self.emit(&[0x32]); // LD (ATOB_FLAGS), A (decimal flag: FF=not seen)
+        self.emit_word(ATOB_FLAGS);
+        self.xor_a();
+        self.emit(&[0x32]); // LD (ATOB_FLAGS+1), A (frac digit count = 0)
+        self.emit_word(ATOB_FLAGS + 1);
+
+        // Check for minus sign
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.emit(&[0xFE, 0x2D]); // CP '-'
+        self.emit(&[0x20, 0x01]); // JR NZ, +1
+        self.emit(&[0x23]); // INC HL (skip minus)
+
+        // Process each character
+        self.label("atob_loop");
+        self.emit(&[0x7E]); // LD A, (HL)
+        self.or_a_a();
+        self.emit(&[0xCA]); // JP Z, atob_done (null terminator)
+        self.fixup("atob_done");
+
+        // Check for decimal point
+        self.emit(&[0xFE, b'.']); // CP '.'
+        self.emit(&[0xC2]); // JP NZ, atob_not_decimal
+        self.fixup("atob_not_decimal");
+        // It's a decimal point - mark it and continue
+        self.xor_a();
+        self.emit(&[0x32]); // LD (ATOB_FLAGS), A (decimal flag = 0, seen)
+        self.emit_word(ATOB_FLAGS);
+        self.inc_hl();
+        self.emit(&[0xC3]); // JP atob_loop
+        self.fixup("atob_loop");
+
+        self.label("atob_not_decimal");
+        // Check if digit
+        self.emit(&[0xFE, 0x30]); // CP '0'
+        self.emit(&[0xDA]); // JP C, atob_done (< '0')
+        self.fixup("atob_done");
+        self.emit(&[0xFE, 0x3A]); // CP '9'+1
+        self.emit(&[0xD2]); // JP NC, atob_done (> '9')
+        self.fixup("atob_done");
+
+        // Check if we've already parsed 2 fractional digits
+        self.emit(&[0x3A]); // LD A, (ATOB_FLAGS+1)
+        self.emit_word(ATOB_FLAGS + 1);
+        self.emit(&[0xFE, 2]); // CP 2
+        self.emit(&[0xD2]); // JP NC, atob_done (already have 2 frac digits)
+        self.fixup("atob_done");
+
+        // It's a valid digit - process it
+        self.emit(&[0x7E]); // LD A, (HL) - reload char
+        self.push_hl();
+        self.emit(&[0xD6, 0x30]); // SUB '0' (convert to digit)
+        self.push_af();
+
+        // Shift BCD_TEMP1 left by one digit (4 bits)
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("atob_shift");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1+3 (LSB)
+        self.emit_word(BCD_TEMP1 + 3);
+        self.or_a_a(); // clear carry
+        self.emit(&[0xCB, 0x26]); // SLA (HL)
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0xCB, 0x16]); // RL (HL)
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0xCB, 0x16]); // RL (HL)
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0xCB, 0x16]); // RL (HL)
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("atob_shift");
+
+        // Add new digit to LSB
+        self.pop_af();
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1+3
+        self.emit_word(BCD_TEMP1 + 3);
+        self.emit(&[0xB6]); // OR (HL)
+        self.emit(&[0x77]); // LD (HL), A
+        self.pop_hl();
+
+        // If decimal was seen, increment frac digit count
+        self.emit(&[0x3A]); // LD A, (ATOB_FLAGS)
+        self.emit_word(ATOB_FLAGS);
+        self.or_a_a();
+        self.emit(&[0x20, 0x07]); // JR NZ, +7 (skip if decimal not seen, 0xFF)
+        self.emit(&[0x3A]); // LD A, (ATOB_FLAGS+1) - 3 bytes
+        self.emit_word(ATOB_FLAGS + 1);
+        self.inc_a(); // 1 byte
+        self.emit(&[0x32]); // LD (ATOB_FLAGS+1), A - 3 bytes
+        self.emit_word(ATOB_FLAGS + 1);
+        // Total: 7 bytes
+
+        self.emit(&[0x23]); // INC HL (next input char)
+        self.emit(&[0xC3]); // JP atob_loop
+        self.fixup("atob_loop");
+
+        // Done parsing - need to scale if fewer than 2 frac digits
+        self.label("atob_done");
+        self.emit(&[0x3A]); // LD A, (ATOB_FLAGS)
+        self.emit_word(ATOB_FLAGS);
+        self.or_a_a();
+        self.emit(&[0x20, 0x03]); // JR NZ, atob_no_decimal (FF = no decimal seen)
+        // Decimal was seen - check frac digit count
+        self.emit(&[0xC3]); // JP atob_check_frac
+        self.fixup("atob_check_frac");
+
+        self.label("atob_no_decimal");
+        // No decimal point - multiply by 100 (shift left 8 bits = 2 BCD digits)
+        self.emit(&[0x06, 8]); // LD B, 8 (shift 8 bits)
+        self.emit(&[0xC3]); // JP atob_scale_loop
+        self.fixup("atob_scale_loop");
+
+        self.label("atob_check_frac");
+        self.emit(&[0x3A]); // LD A, (ATOB_FLAGS+1)
+        self.emit_word(ATOB_FLAGS + 1);
+        self.emit(&[0xFE, 2]); // CP 2
+        self.ret_nc(); // >= 2 frac digits, done
+        self.emit(&[0xFE, 1]); // CP 1
+        self.emit(&[0xCA]); // JP Z, atob_scale_1
+        self.fixup("atob_scale_1");
+        // 0 frac digits (e.g., "123." entered) - multiply by 100
+        self.emit(&[0x06, 8]); // LD B, 8
+        self.emit(&[0xC3]); // JP atob_scale_loop
+        self.fixup("atob_scale_loop");
+
+        self.label("atob_scale_1");
+        // 1 frac digit - multiply by 10 (shift left 4 bits)
+        self.emit(&[0x06, 4]); // LD B, 4
+
+        self.label("atob_scale_loop");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1+3
+        self.emit_word(BCD_TEMP1 + 3);
+        self.or_a_a();
+        self.emit(&[0xCB, 0x26]); // SLA (HL)
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0xCB, 0x16]); // RL (HL)
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0xCB, 0x16]); // RL (HL)
+        self.emit(&[0x2B]); // DEC HL
+        self.emit(&[0xCB, 0x16]); // RL (HL)
+        self.emit(&[0x10]); // DJNZ atob_scale_loop
+        self.emit_relative("atob_scale_loop");
+        self.ret();
+
+        // bcd_to_ascii: Convert packed BCD at BCD_TEMP1 to ASCII in INPUT_BUF
+        // Format: 6 whole digits + '.' + 2 fractional digits (fixed point, 2 decimal places)
+        // Sets INPUT_LEN = 9
+        self.label("bcd_to_ascii");
+        self.emit(&[0x21]); // LD HL, INPUT_BUF
+        self.emit_word(INPUT_BUF);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+
+        // Output first 3 BCD bytes (6 digits = whole part)
+        self.emit(&[0x06, 3]); // LD B, 3
+        self.label("btoa_whole_loop");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0xF5]); // PUSH AF (save byte)
+        // High nibble
+        self.emit(&[0xCB, 0x3F]); // SRL A x4
+        self.emit(&[0xCB, 0x3F]);
+        self.emit(&[0xCB, 0x3F]);
+        self.emit(&[0xCB, 0x3F]);
+        self.emit(&[0xC6, 0x30]); // ADD A, '0'
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        // Low nibble
+        self.emit(&[0xF1]); // POP AF
+        self.emit(&[0xE6, 0x0F]); // AND 0x0F
+        self.emit(&[0xC6, 0x30]); // ADD A, '0'
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x13]); // INC DE
+        self.emit(&[0x10]); // DJNZ btoa_whole_loop
+        self.emit_relative("btoa_whole_loop");
+
+        // Output decimal point
+        self.emit(&[0x3E, b'.']); // LD A, '.'
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+
+        // Output last BCD byte (2 digits = fractional part)
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0xF5]); // PUSH AF
+        // High nibble
+        self.emit(&[0xCB, 0x3F]); // SRL A x4
+        self.emit(&[0xCB, 0x3F]);
+        self.emit(&[0xCB, 0x3F]);
+        self.emit(&[0xCB, 0x3F]);
+        self.emit(&[0xC6, 0x30]); // ADD A, '0'
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        // Low nibble
+        self.emit(&[0xF1]); // POP AF
+        self.emit(&[0xE6, 0x0F]); // AND 0x0F
+        self.emit(&[0xC6, 0x30]); // ADD A, '0'
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+
+        // Null terminate
+        self.xor_a();
+        self.emit(&[0x77]); // LD (HL), 0
+
+        // Store length = 9
+        self.emit(&[0x3E, 9]); // LD A, 9
+        self.emit(&[0x32]); // LD (INPUT_LEN), A
+        self.emit_word(INPUT_LEN);
+        self.ret();
+
+        // btoa_digit: Output single BCD digit (A) to (HL), increment HL and C
+        // Simplified version - always outputs, leading zero handling in post-processing
+        self.label("btoa_digit");
+        // Just output the digit unconditionally
+        self.emit(&[0xC6, 0x30]); // ADD A, '0'
+        self.emit(&[0x77]); // LD (HL), A
+        self.emit(&[0x23]); // INC HL
+        self.emit(&[0x0C]); // INC C (length)
+        self.ret();
+
+        // Dummy labels that were referenced but no longer needed
+        self.label("btoa_skip");
+        self.ret();
+        self.label("btoa_output");
         self.ret();
     }
 
@@ -1929,14 +2632,25 @@ impl SpreadsheetCodeGen {
         self.emit(&[0xDA]); // JP C, formula_eval_error
         self.fixup("formula_eval_error");
 
-        // Store calculated value after formula string
-        self.ex_de_hl(); //DE = result)
-        self.pop_hl(); //value address)
-        self.emit(&[0x73]); // LD (HL), E
+        // Store sign + 4-byte BCD value after formula string
+        self.pop_hl(); // HL = value address
+        // Store sign byte first
+        self.emit(&[0x3A]); // LD A, (SIGN_ACCUM)
+        self.emit_word(SIGN_ACCUM);
+        self.emit(&[0x77]); // LD (HL), A
         self.inc_hl();
-        self.emit(&[0x72]); // LD (HL), D
+        // Store 4 BCD bytes
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("store_formula_bcd");
+        self.emit(&[0x1A]); // LD A, (DE)
+        self.emit(&[0x77]); // LD (HL), A
         self.inc_hl();
-        // Update FORMULA_PTR
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ store_formula_bcd
+        self.emit_relative("store_formula_bcd");
+        // Update FORMULA_PTR (HL now points past 5-byte value)
         self.emit(&[0x22]); // LD (FORMULA_PTR), HL
         self.emit_word(FORMULA_PTR);
 
@@ -1970,20 +2684,31 @@ impl SpreadsheetCodeGen {
 
         // Evaluate expression with chaining support (e.g., =A1+A2+A3)
         // Input: HL = pointer to expression string
-        // Output: HL = result, carry set on error
+        // Output: Result in BCD_TEMP1, carry set on error
         self.label("eval_expr");
         self.emit(&[0x22]); // LD (TEMP2), HL (save expr ptr)
         self.emit_word(TEMP2);
 
-        // Parse first operand (cell ref or number)
+        // Parse first operand (result goes to BCD_TEMP1, sign in TEMP1)
         self.emit(&[0xCD]); // CALL parse_operand
         self.fixup("parse_operand");
         self.emit(&[0xD8]); // RET C (error)
-        // HL = accumulator (running result)
+        // Save first operand's sign as accumulator sign
+        self.emit(&[0x3A]); // LD A, (TEMP1)
+        self.emit_word(TEMP1);
+        self.emit(&[0x32]); // LD (SIGN_ACCUM), A
+        self.emit_word(SIGN_ACCUM);
 
         // Main evaluation loop - check for more operators
         self.label("eval_loop");
-        self.push_hl(); //save accumulator)
+        // Save accumulator: copy BCD_TEMP1 to BCD_ACCUM
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+
         self.emit(&[0x2A]); // LD HL, (TEMP2)
         self.emit_word(TEMP2);
         self.ld_a_hl_ind();
@@ -1994,19 +2719,30 @@ impl SpreadsheetCodeGen {
         // Save operator
         self.emit(&[0x32]); // LD (TEMP1+1), A
         self.emit_word(TEMP1 + 1);
-        self.inc_hl(); //past operator)
+        self.inc_hl(); // past operator
         self.emit(&[0x22]); // LD (TEMP2), HL
         self.emit_word(TEMP2);
 
-        // Parse next operand
+        // Parse next operand (result goes to BCD_TEMP1, sign in TEMP1)
         self.emit(&[0xCD]); // CALL parse_operand
         self.fixup("parse_operand");
         self.emit(&[0xDA]); // JP C, eval_chain_error
         self.fixup("eval_chain_error");
-        // HL = next operand
-        self.ex_de_hl(); //DE = next operand)
-        self.pop_hl(); //accumulator)
-        // HL = accumulator, DE = next operand
+        // Save operand's sign to SIGN_OP
+        self.emit(&[0x3A]); // LD A, (TEMP1)
+        self.emit_word(TEMP1);
+        self.emit(&[0x32]); // LD (SIGN_OP), A
+        self.emit_word(SIGN_OP);
+
+        // Now: BCD_TEMP1 = new operand, BCD_ACCUM = old accumulator
+        // Copy BCD_ACCUM to BCD_TEMP2 for operation
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x11]); // LD DE, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // BCD_TEMP1 = new operand, BCD_TEMP2 = old accumulator
 
         // Get operator and dispatch
         self.emit(&[0x3A]); // LD A, (TEMP1+1)
@@ -2028,162 +2764,148 @@ impl SpreadsheetCodeGen {
         self.ret();
 
         self.label("eval_done");
-        self.pop_hl(); //accumulator = final result)
-        self.or_a_a(); //clear carry)
+        // Result is in BCD_TEMP1, copy back to BCD_ACCUM for formula storage
+        // Actually, we need to return the BCD in a usable format
+        self.or_a_a(); // clear carry
         self.ret();
 
         self.label("eval_chain_error");
-        self.pop_hl(); //discard accumulator)
         self.emit(&[0x37]); // SCF
         self.ret();
 
-        // HL + DE -> HL, then loop
+        // Signed addition: BCD_TEMP2 + BCD_TEMP1 -> BCD_TEMP1
+        // SIGN_ACCUM = sign of TEMP2, SIGN_OP = sign of TEMP1
         self.label("eval_add");
-        self.add_hl_de();
+        // Check if signs are the same
+        self.emit(&[0x3A]); // LD A, (SIGN_ACCUM)
+        self.emit_word(SIGN_ACCUM);
+        self.ld_b_a();
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0xB8]); // CP B (compare signs)
+        self.emit(&[0xCA]); // JP Z, eval_add_same_sign
+        self.fixup("eval_add_same_sign");
+
+        // Different signs: need to subtract smaller from larger
+        // Compare magnitudes: TEMP2 vs TEMP1
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_cmp (C set if TEMP2 < TEMP1)
+        self.fixup("bcd_cmp");
+        self.emit(&[0xDA]); // JP C, eval_add_op_larger (TEMP2 < TEMP1)
+        self.fixup("eval_add_op_larger");
+
+        // TEMP2 >= TEMP1: result = TEMP2 - TEMP1, sign = SIGN_ACCUM
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_sub (TEMP2 - TEMP1 -> TEMP2)
+        self.fixup("bcd_sub");
+        // Copy result from TEMP2 to TEMP1
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // Sign stays as SIGN_ACCUM (already set)
         self.emit(&[0xC3]); // JP eval_loop
         self.fixup("eval_loop");
 
-        // HL - DE -> HL, then loop
+        // TEMP1 > TEMP2: result = TEMP1 - TEMP2, sign = SIGN_OP
+        self.label("eval_add_op_larger");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_sub (TEMP1 - TEMP2 -> TEMP1)
+        self.fixup("bcd_sub");
+        // Set result sign to SIGN_OP
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0x32]); // LD (SIGN_ACCUM), A
+        self.emit_word(SIGN_ACCUM);
+        self.emit(&[0xC3]); // JP eval_loop
+        self.fixup("eval_loop");
+
+        // Same signs: just add magnitudes, keep the sign
+        self.label("eval_add_same_sign");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_add
+        self.fixup("bcd_add");
+        // Sign stays as SIGN_ACCUM (same as SIGN_OP)
+        self.emit(&[0xC3]); // JP eval_loop
+        self.fixup("eval_loop");
+
+        // Signed subtraction: A - B = A + (-B)
+        // Just flip SIGN_OP and use addition logic
         self.label("eval_sub");
-        self.or_a_a(); //clear carry for SBC)
-        self.emit(&[0xED, 0x52]); // SBC HL, DE
-        self.emit(&[0xC3]); // JP eval_loop
-        self.fixup("eval_loop");
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0xEE, 0x80]); // XOR 0x80 (flip sign)
+        self.emit(&[0x32]); // LD (SIGN_OP), A
+        self.emit_word(SIGN_OP);
+        self.emit(&[0xC3]); // JP eval_add
+        self.fixup("eval_add");
 
-        // HL * DE (16-bit multiply)
+        // BCD_TEMP2 * BCD_TEMP1 -> BCD_TEMP1 (with sign handling)
         self.label("eval_mul");
-        // Save sign: XOR high bytes to get result sign
-        self.emit(&[0x7C]); // LD A, H
-        self.emit(&[0xAA]); // XOR D
-        self.push_af(); //save sign in bit 7)
-        // Make both positive
-        self.emit(&[0x7C]); // LD A, H
-        self.or_a_a();
-        self.emit(&[0xF2]); // JP P, mul_hl_pos
-        self.fixup("mul_hl_pos");
-        // Negate HL
-        self.emit(&[0x7C]); // LD A, H
-        self.cpl();
-        self.emit(&[0x67]); // LD H, A
-        self.emit(&[0x7D]); // LD A, L
-        self.cpl();
-        self.emit(&[0x6F]); // LD L, A
-        self.inc_hl();
-        self.label("mul_hl_pos");
-        self.ld_a_d();
-        self.or_a_a();
-        self.emit(&[0xF2]); // JP P, mul_de_pos
-        self.fixup("mul_de_pos");
-        // Negate DE
-        self.ld_a_d();
-        self.cpl();
-        self.ld_d_a();
-        self.ld_a_e();
-        self.cpl();
-        self.ld_e_a();
-        self.inc_de();
-        self.label("mul_de_pos");
-        // Now HL and DE are positive, multiply
-        self.push_bc();
-        self.emit(&[0x44]); // LD B, H
-        self.emit(&[0x4D]); // LD C, L (BC = multiplicand)
-        self.emit(&[0x21, 0x00, 0x00]); // LD HL, 0 (result)
-        self.emit(&[0x3E, 16]); // LD A, 16 (bit counter)
-        self.label("mul_loop");
-        self.add_hl_hl(); //shift result left)
-        self.emit(&[0xCB, 0x13]); // RL E
-        self.emit(&[0xCB, 0x12]); // RL D (shift DE left, high bit to carry)
-        self.emit(&[0x30, 0x01]); // JR NC, +1 (skip add if bit was 0)
-        self.add_hl_bc();
-        self.dec_a();
-        self.emit(&[0xC2]); // JP NZ, mul_loop
-        self.fixup("mul_loop");
-        self.pop_bc();
-        // Apply sign
-        self.pop_af(); //sign in bit 7)
-        self.or_a_a();
-        self.emit(&[0xF2]); // JP P, mul_done
-        self.fixup("mul_done");
-        // Negate result
-        self.emit(&[0x7C]); // LD A, H
-        self.cpl();
-        self.emit(&[0x67]); // LD H, A
-        self.emit(&[0x7D]); // LD A, L
-        self.cpl();
-        self.emit(&[0x6F]); // LD L, A
-        self.inc_hl();
-        self.label("mul_done");
+        // Result sign = SIGN_ACCUM XOR SIGN_OP
+        self.emit(&[0x3A]); // LD A, (SIGN_ACCUM)
+        self.emit_word(SIGN_ACCUM);
+        self.ld_b_a();
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0xA8]); // XOR B
+        self.emit(&[0x32]); // LD (SIGN_ACCUM), A (result sign)
+        self.emit_word(SIGN_ACCUM);
+        // Do the multiplication
+        self.emit(&[0xCD]); // CALL bcd_mul
+        self.fixup("bcd_mul");
         self.emit(&[0xC3]); // JP eval_loop
         self.fixup("eval_loop");
 
-        // HL / DE (16-bit divide)
+        // BCD_TEMP2 / BCD_TEMP1 -> BCD_TEMP1 (with sign handling)
         self.label("eval_div");
-        // Check for divide by zero
-        self.ld_a_d();
-        self.emit(&[0xB3]); // OR E
-        self.emit(&[0xC2]); // JP NZ, div_ok
-        self.fixup("div_ok");
-        self.emit(&[0x37]); // SCF (divide by zero error)
-        self.ret();
-        self.label("div_ok");
-        // Save sign
-        self.emit(&[0x7C]); // LD A, H
-        self.emit(&[0xAA]); // XOR D
-        self.push_af();
-        // Make both positive
-        self.emit(&[0x7C]); // LD A, H
-        self.or_a_a();
-        self.emit(&[0xF2]); // JP P, div_hl_pos
-        self.fixup("div_hl_pos");
-        self.emit(&[0x7C]); // LD A, H
-        self.cpl();
-        self.emit(&[0x67]); // LD H, A
-        self.emit(&[0x7D]); // LD A, L
-        self.cpl();
-        self.emit(&[0x6F]); // LD L, A
-        self.inc_hl();
-        self.label("div_hl_pos");
-        self.ld_a_d();
-        self.or_a_a();
-        self.emit(&[0xF2]); // JP P, div_de_pos
-        self.fixup("div_de_pos");
-        self.ld_a_d();
-        self.cpl();
-        self.ld_d_a();
-        self.ld_a_e();
-        self.cpl();
-        self.ld_e_a();
-        self.inc_de();
-        self.label("div_de_pos");
-        // Divide HL by DE using repeated subtraction
-        self.push_bc();
-        self.emit(&[0x01, 0x00, 0x00]); // LD BC, 0 (quotient)
-        self.label("div_loop");
-        self.or_a_a();
-        self.emit(&[0xED, 0x52]); // SBC HL, DE
-        self.emit(&[0xDA]); // JP C, div_restore
-        self.fixup("div_restore");
-        self.emit(&[0x03]); // INC BC
-        self.emit(&[0xC3]); // JP div_loop
-        self.fixup("div_loop");
-        self.label("div_restore");
-        self.add_hl_de(); //restore remainder)
-        self.emit(&[0x60]); // LD H, B
-        self.emit(&[0x69]); // LD L, C (HL = quotient)
-        self.pop_bc();
-        // Apply sign
-        self.pop_af();
-        self.or_a_a();
-        self.emit(&[0xF2]); // JP P, div_done
-        self.fixup("div_done");
-        self.emit(&[0x7C]); // LD A, H
-        self.cpl();
-        self.emit(&[0x67]); // LD H, A
-        self.emit(&[0x7D]); // LD A, L
-        self.cpl();
-        self.emit(&[0x6F]); // LD L, A
-        self.inc_hl();
-        self.label("div_done");
+        // Result sign = SIGN_ACCUM XOR SIGN_OP
+        self.emit(&[0x3A]); // LD A, (SIGN_ACCUM)
+        self.emit_word(SIGN_ACCUM);
+        self.ld_b_a();
+        self.emit(&[0x3A]); // LD A, (SIGN_OP)
+        self.emit_word(SIGN_OP);
+        self.emit(&[0xA8]); // XOR B
+        self.emit(&[0x32]); // LD (SIGN_ACCUM), A (result sign)
+        self.emit_word(SIGN_ACCUM);
+        // bcd_div: BCD_TEMP1 / BCD_TEMP2 -> BCD_TEMP1
+        // We need: TEMP2 (old accum) / TEMP1 (new operand) -> TEMP1
+        // Swap TEMP1 and TEMP2 first
+        self.emit(&[0x21]); // LD HL, BCD_ACCUM (use as temp)
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_copy (ACCUM = TEMP1)
+        self.fixup("bcd_copy");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_copy (TEMP1 = TEMP2)
+        self.fixup("bcd_copy");
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x11]); // LD DE, BCD_ACCUM
+        self.emit_word(BCD_ACCUM);
+        self.emit(&[0xCD]); // CALL bcd_copy (TEMP2 = ACCUM, completing swap)
+        self.fixup("bcd_copy");
+        // Now TEMP1 has dividend, TEMP2 has divisor
+        self.emit(&[0xCD]); // CALL bcd_div
+        self.fixup("bcd_div");
         self.emit(&[0xC3]); // JP eval_loop
         self.fixup("eval_loop");
 
@@ -2266,95 +2988,135 @@ impl SpreadsheetCodeGen {
         self.emit_word(TEMP2);
         // B = col, C = row (1-based), convert to 0-based
         self.dec_c();
-        // Get cell value
+        // Get cell value as BCD into BCD_TEMP1
         self.emit(&[0xCD]); // CALL get_cell_addr
         self.fixup("get_cell_addr");
         self.ld_a_hl_ind(); // type
         self.or_a_a();
         self.emit(&[0xCA]); // JP Z, parse_op_zero (empty cell = 0)
         self.fixup("parse_op_zero");
+        // Check if formula (type 2)
+        self.emit(&[0xFE, CELL_FORMULA]); // CP CELL_FORMULA
+        self.emit(&[0xCA]); // JP Z, parse_op_formula
+        self.fixup("parse_op_formula");
+        // Number cell: copy sign and BCD from cell to BCD_TEMP1
         self.inc_hl();
+        self.ld_a_hl_ind(); // sign
+        self.emit(&[0x32]); // LD (BCD_SIGN), A - save sign for later
+        self.emit_word(TEMP1); // using TEMP1 to store sign
         self.inc_hl();
+        // Copy 4 BCD bytes to BCD_TEMP1
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("load_cell_bcd");
+        self.ld_a_hl_ind();
+        self.emit(&[0x12]); // LD (DE), A
+        self.inc_hl();
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("load_cell_bcd");
+        self.or_a_a(); // clear carry
+        self.ret();
+
+        // Formula cell: get computed value from formula storage
+        self.label("parse_op_formula");
+        self.inc_hl(); // skip type
+        self.inc_hl(); // skip flags
+        // Get formula pointer
         self.emit(&[0x5E]); // LD E, (HL)
         self.inc_hl();
         self.emit(&[0x56]); // LD D, (HL)
+        // DE = formula pointer, find end of string
         self.ex_de_hl();
-        self.or_a_a(); //clear carry)
+        self.label("parse_op_find_end");
+        self.ld_a_hl_ind();
+        self.inc_hl();
+        self.or_a_a();
+        self.emit(&[0xC2]); // JP NZ, parse_op_find_end
+        self.fixup("parse_op_find_end");
+        // HL now points to sign byte, then 4 BCD bytes
+        self.ld_a_hl_ind(); // load sign
+        self.emit(&[0x32]); // LD (TEMP1), A
+        self.emit_word(TEMP1);
+        self.inc_hl(); // point to BCD
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("load_formula_bcd_op");
+        self.ld_a_hl_ind();
+        self.emit(&[0x12]); // LD (DE), A
+        self.inc_hl();
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ load_formula_bcd_op
+        self.emit_relative("load_formula_bcd_op");
+        self.or_a_a(); // clear carry
         self.ret();
 
         self.label("parse_op_zero");
-        self.emit(&[0x21, 0x00, 0x00]); // LD HL, 0
+        // Zero BCD_TEMP1
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        self.emit(&[0xAF]); // XOR A
+        self.emit(&[0x32]); // LD (TEMP1), A (sign = 0)
+        self.emit_word(TEMP1);
         self.or_a_a();
         self.ret();
 
-        // Parse number operand
+        // Parse number operand to BCD
+        // Uses ascii_to_bcd which stops at non-digit chars
         self.label("parse_op_number");
         self.emit(&[0x2A]); // LD HL, (TEMP2)
         self.emit_word(TEMP2);
-        self.emit(&[0x11, 0x00, 0x00]); // LD DE, 0 (accumulator)
-        self.emit(&[0x0E, 0x00]); // LD C, 0 (negative flag)
+        self.emit(&[0xAF]); // XOR A (clear sign)
+        self.emit(&[0x32]); // LD (TEMP1), A
+        self.emit_word(TEMP1);
 
         // Check minus
         self.ld_a_hl_ind();
         self.emit(&[0xFE, b'-']);
-        self.emit(&[0xC2]); // JP NZ, parse_opn_loop
-        self.fixup("parse_opn_loop");
-        self.emit(&[0x0E, 0x01]); // LD C, 1
-        self.inc_hl();
+        self.emit(&[0x20, 0x06]); // JR NZ, +6 (skip negative handling: 2+3+1=6 bytes)
+        self.emit(&[0x3E, 0x80]); // LD A, 0x80 (negative sign) - 2 bytes
+        self.emit(&[0x32]); // LD (TEMP1), A - 3 bytes with word
+        self.emit_word(TEMP1);
+        self.inc_hl(); // - 1 byte
 
-        self.label("parse_opn_loop");
-        self.ld_a_hl_ind();
-        self.emit(&[0xFE, b'0']);
-        self.emit(&[0xDA]); // JP C, parse_opn_done
-        self.fixup("parse_opn_done");
-        self.emit(&[0xFE, b'9' + 1]);
-        self.emit(&[0xD2]); // JP NC, parse_opn_done
-        self.fixup("parse_opn_done");
-        self.emit(&[0xD6, b'0']); // SUB '0'
-        self.push_af();
-        // Multiply DE by 10: x10 = x2 + x8
-        self.ex_de_hl(); // HL = accumulator
-        self.add_hl_hl(); // x2
-        self.emit(&[0x54]); // LD D, H (save x2 in DE)
-        self.emit(&[0x5D]); // LD E, L
-        self.add_hl_hl(); // x4
-        self.add_hl_hl(); // x8
-        self.add_hl_de(); // x8 + x2 = x10
-        self.ex_de_hl(); // DE = accumulator
-        // Add digit
-        self.pop_af();
-        self.emit(&[0x6F]); // LD L, A
-        self.emit(&[0x26, 0x00]); // LD H, 0
-        self.add_hl_de();
-        self.ex_de_hl();
+        // Call ascii_to_bcd (HL points to digit string)
+        // Result in BCD_TEMP1, HL updated past digits
+        self.emit(&[0xCD]); // CALL ascii_to_bcd
+        self.fixup("ascii_to_bcd");
+
+        // Update TEMP2 with new position (scan past digits and decimal point)
         self.emit(&[0x2A]); // LD HL, (TEMP2)
         self.emit_word(TEMP2);
+        self.ld_a_hl_ind();
+        self.emit(&[0xFE, b'-']);
+        self.emit(&[0x20, 0x01]); // JR NZ, +1
         self.inc_hl();
-        self.emit(&[0x22]); // LD (TEMP2), HL
-        self.emit_word(TEMP2);
-        self.emit(&[0xC3]); // JP parse_opn_loop
-        self.fixup("parse_opn_loop");
+        self.label("parse_opn_scan");
+        self.ld_a_hl_ind();
+        // Check for decimal point
+        self.emit(&[0xFE, b'.']);
+        self.emit(&[0xCA]); // JP Z, parse_opn_next (skip decimal point)
+        self.fixup("parse_opn_next");
+        // Check for digit
+        self.emit(&[0xFE, b'0']);
+        self.emit(&[0xDA]); // JP C, parse_opn_done (< '0')
+        self.fixup("parse_opn_done");
+        self.emit(&[0xFE, b'9' + 1]);
+        self.emit(&[0xD2]); // JP NC, parse_opn_done (> '9')
+        self.fixup("parse_opn_done");
+        self.label("parse_opn_next");
+        self.inc_hl();
+        self.emit(&[0xC3]); // JP parse_opn_scan
+        self.fixup("parse_opn_scan");
 
         self.label("parse_opn_done");
         self.emit(&[0x22]); // LD (TEMP2), HL
         self.emit_word(TEMP2);
-        self.ex_de_hl();
-        // Check negative
-        self.ld_a_c();
-        self.or_a_a();
-        self.emit(&[0xCA]); // JP Z, parse_opn_ret
-        self.fixup("parse_opn_ret");
-        // Negate
-        self.emit(&[0x7C]); // LD A, H
-        self.cpl();
-        self.emit(&[0x67]); // LD H, A
-        self.emit(&[0x7D]); // LD A, L
-        self.cpl();
-        self.emit(&[0x6F]); // LD L, A
-        self.inc_hl();
-
-        self.label("parse_opn_ret");
-        self.or_a_a();
+        self.or_a_a(); // clear carry
         self.ret();
 
         // Parse function like @SUM(A1:A5), @AVG, @MIN, @MAX, @COUNT
@@ -2546,13 +3308,16 @@ impl SpreadsheetCodeGen {
         self.fixup("pf_error");
         self.inc_hl();
 
-        // Parse second cell - skip col, parse row2 directly
+        // Parse second cell - col2 and row2
         self.ld_a_hl_ind();
         self.emit(&[0xE6, 0xDF]); // uppercase
         self.emit(&[0xFE, b'A']);
         self.emit(&[0xDA]); // JP C, pf_error
         self.fixup("pf_error");
-        self.inc_hl(); //skip col letter)
+        self.emit(&[0xD6, b'A']); // SUB 'A'
+        self.emit(&[0x32]); // LD (RANGE_COL2), A (col2)
+        self.emit_word(RANGE_COL2);
+        self.inc_hl();
         // Parse row2
         self.emit(&[0x0E, 0x00]); // LD C, 0
         self.label("pf_row2_loop");
@@ -2591,68 +3356,128 @@ impl SpreadsheetCodeGen {
         self.emit(&[0x22]); // LD (TEMP2), HL (update pointer - overwrites low byte)
         self.emit_word(TEMP2);
 
-        // Initialize accumulators based on function type
-        // DE = sum (for SUM/AVG), FUNC_COUNT = count, FUNC_MINMAX = min/max
-        self.emit(&[0x11, 0x00, 0x00]); // LD DE, 0 (sum)
+        // Initialize accumulators for BCD functions
+        // Clear FUNC_BCD (4-byte BCD sum/min/max accumulator)
+        self.emit(&[0x21]); // LD HL, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        // Clear count and sign
         self.xor_a();
         self.emit(&[0x32]); // LD (FUNC_COUNT), A
         self.emit_word(FUNC_COUNT);
         self.emit(&[0x32]); // LD (FUNC_COUNT+1), A
         self.emit_word(FUNC_COUNT + 1);
+        self.emit(&[0x32]); // LD (FUNC_SIGN), A (accumulator is positive)
+        self.emit_word(FUNC_SIGN);
 
-        // Initialize min to 32767, max to 0
-        // (For spreadsheet use, values are typically positive)
-        self.emit(&[0x21]); // LD HL, 32767
-        self.emit_word(32767);
-        self.emit(&[0x22]); // LD (FUNC_MINMAX), HL
-        self.emit_word(FUNC_MINMAX);
-        // For MAX, initialize to 0 instead
+        // For MIN, initialize FUNC_BCD to max BCD value (99999999)
         self.emit(&[0x3A]); // LD A, (FUNC_TYPE)
         self.emit_word(FUNC_TYPE);
-        self.emit(&[0xFE, 0x03]); // CP 3 (MAX)
+        self.emit(&[0xFE, 0x02]); // CP 2 (MIN)
         self.emit(&[0xC2]); // JP NZ, pf_init_done
         self.fixup("pf_init_done");
-        self.emit(&[0x21, 0x00, 0x00]); // LD HL, 0
-        self.emit(&[0x22]); // LD (FUNC_MINMAX), HL
-        self.emit_word(FUNC_MINMAX);
+        // Set FUNC_BCD to 99 99 99 99 (max BCD value)
+        self.emit(&[0x21]); // LD HL, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0x3E, 0x99]); // LD A, 0x99
+        self.emit(&[0x77]); // LD (HL), A
+        self.inc_hl();
+        self.emit(&[0x77]); // LD (HL), A
+        self.inc_hl();
+        self.emit(&[0x77]); // LD (HL), A
+        self.inc_hl();
+        self.emit(&[0x77]); // LD (HL), A
         self.label("pf_init_done");
 
-        // C = current row
+        // Initialize current column = col1
+        self.emit(&[0x3A]); // LD A, (TEMP1) (col1)
+        self.emit_word(TEMP1);
+        self.emit(&[0x32]); // LD (RANGE_CUR_COL), A
+        self.emit_word(RANGE_CUR_COL);
+
+        // Outer loop: columns
+        self.label("pf_col_loop");
+        // C = row1 (reset for each column)
         self.emit(&[0x3A]); // LD A, (TEMP1+1) (row1)
         self.emit_word(TEMP1 + 1);
         self.ld_c_a();
 
-        self.label("pf_loop");
-        // Get cell value at (col1, C)
-        self.push_de(); //save sum)
-        self.emit(&[0x3A]); // LD A, (TEMP1)
-        self.emit_word(TEMP1);
-        self.ld_b_a(); //col)
-        self.push_bc(); //save row counter)
+        // Inner loop: rows
+        self.label("pf_row_loop");
+        // Get cell value at (current_col, C)
+        self.emit(&[0x3A]); // LD A, (RANGE_CUR_COL)
+        self.emit_word(RANGE_CUR_COL);
+        self.ld_b_a(); // col
+        self.push_bc(); // save row counter (C) and col (B)
         self.emit(&[0xCD]); // CALL get_cell_addr
         self.fixup("get_cell_addr");
         // HL = cell addr
         self.ld_a_hl_ind(); // type
         self.emit(&[0xFE, CELL_NUMBER]); // CP CELL_NUMBER
-        self.emit(&[0xC2]); // JP NZ, pf_skip (not a number)
+        self.emit(&[0xCA]); // JP Z, pf_is_number
+        self.fixup("pf_is_number");
+        self.emit(&[0xFE, CELL_FORMULA]); // CP CELL_FORMULA
+        self.emit(&[0xCA]); // JP Z, pf_is_formula
+        self.fixup("pf_is_formula");
+        // Not a number or formula - skip
+        self.emit(&[0xC3]); // JP pf_skip
         self.fixup("pf_skip");
 
-        // Found a number - increment count
-        self.push_hl(); //save cell addr)
+        // Handle formula cell - get BCD value from formula storage
+        self.label("pf_is_formula");
+        self.inc_hl();
+        self.inc_hl();
+        self.emit(&[0x5E]); // LD E, (HL) - get formula pointer low
+        self.inc_hl();
+        self.emit(&[0x56]); // LD D, (HL) - get formula pointer high
+        self.ex_de_hl(); // HL = formula pointer
+        // Scan to end of formula string
+        self.label("pf_scan_formula");
+        self.ld_a_hl_ind();
+        self.inc_hl();
+        self.or_a_a();
+        self.emit(&[0xC2]); // JP NZ, pf_scan_formula
+        self.fixup("pf_scan_formula");
+        // HL now points to sign byte after null terminator
+        self.ld_a_hl_ind(); // read sign
+        self.emit(&[0x32]); // LD (FUNC_SIGN2), A
+        self.emit_word(FUNC_SIGN2);
+        self.inc_hl(); // HL now points to BCD value
+        self.emit(&[0xC3]); // JP pf_read_bcd
+        self.fixup("pf_read_bcd");
+
+        // Handle number cell - BCD is at bytes 2-5
+        self.label("pf_is_number");
+        self.inc_hl(); // skip type
+        self.ld_a_hl_ind(); // read sign byte
+        self.emit(&[0x32]); // LD (FUNC_SIGN2), A
+        self.emit_word(FUNC_SIGN2);
+        self.inc_hl(); // HL now points to BCD data
+
+        // Common code to read BCD value (HL points to BCD data)
+        self.label("pf_read_bcd");
+        // Found a value - increment count
+        self.push_hl(); // save BCD addr
         self.emit(&[0x2A]); // LD HL, (FUNC_COUNT)
         self.emit_word(FUNC_COUNT);
         self.inc_hl();
         self.emit(&[0x22]); // LD (FUNC_COUNT), HL
         self.emit_word(FUNC_COUNT);
-        self.pop_hl(); //restore cell addr)
+        self.pop_hl(); // restore BCD addr
 
-        // Get cell value into DE
+        // Copy 4-byte BCD to FUNC_BCD2
+        self.emit(&[0x11]); // LD DE, FUNC_BCD2
+        self.emit_word(FUNC_BCD2);
+        self.emit(&[0x06, 4]); // LD B, 4
+        self.label("pf_copy_bcd");
+        self.ld_a_hl_ind();
+        self.emit(&[0x12]); // LD (DE), A
         self.inc_hl();
-        self.inc_hl();
-        self.emit(&[0x5E]); // LD E, (HL)
-        self.inc_hl();
-        self.emit(&[0x56]); // LD D, (HL)
-        // DE = cell value
+        self.inc_de();
+        self.emit(&[0x10]); // DJNZ pf_copy_bcd
+        self.emit_relative("pf_copy_bcd");
+        // FUNC_BCD2 now has the cell's BCD value
 
         // Check function type for SUM/AVG vs MIN/MAX
         self.emit(&[0x3A]); // LD A, (FUNC_TYPE)
@@ -2664,127 +3489,314 @@ impl SpreadsheetCodeGen {
         self.emit(&[0xCA]); // JP Z, pf_do_max
         self.fixup("pf_do_max");
 
-        // SUM/AVG/COUNT: add to sum
-        self.pop_bc();
-        self.pop_hl(); //sum in HL)
-        self.add_hl_de();
-        self.ex_de_hl(); //sum back in DE)
+        // SUM/AVG/COUNT: signed add FUNC_BCD2 to FUNC_BCD
+        // Set up for eval_add: FUNC_BCD → BCD_TEMP2, FUNC_BCD2 → BCD_TEMP1
+        self.pop_bc(); // restore row counter
+        self.push_bc(); // save it again for after eval_add
+
+        // Copy FUNC_BCD to BCD_TEMP2 (accumulator to temp)
+        // bcd_copy copies from (DE) to (HL)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2 (dest)
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD (src)
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+
+        // Copy FUNC_BCD2 to BCD_TEMP1 (operand to temp)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1 (dest)
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD2 (src)
+        self.emit_word(FUNC_BCD2);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+
+        // Copy signs: FUNC_SIGN → SIGN_ACCUM, FUNC_SIGN2 → SIGN_OP
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN)
+        self.emit_word(FUNC_SIGN);
+        self.emit(&[0x32]); // LD (SIGN_ACCUM), A
+        self.emit_word(SIGN_ACCUM);
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN2)
+        self.emit_word(FUNC_SIGN2);
+        self.emit(&[0x32]); // LD (SIGN_OP), A
+        self.emit_word(SIGN_OP);
+
+        // Call signed addition (result in BCD_TEMP1, sign in SIGN_ACCUM)
+        self.emit(&[0xCD]); // CALL signed_add
+        self.fixup("signed_add");
+
+        // Copy result back: BCD_TEMP1 → FUNC_BCD, SIGN_ACCUM → FUNC_SIGN
+        // bcd_copy copies from (DE) to (HL)
+        self.emit(&[0x21]); // LD HL, FUNC_BCD (dest)
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0x11]); // LD DE, BCD_TEMP1 (src)
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        self.emit(&[0x3A]); // LD A, (SIGN_ACCUM)
+        self.emit_word(SIGN_ACCUM);
+        self.emit(&[0x32]); // LD (FUNC_SIGN), A
+        self.emit_word(FUNC_SIGN);
+
+        self.pop_bc(); // restore row counter
         self.emit(&[0xC3]); // JP pf_next
         self.fixup("pf_next");
 
-        // MIN: if DE < (FUNC_MINMAX), update
+        // MIN: if FUNC_BCD2 < FUNC_BCD, update FUNC_BCD
         self.label("pf_do_min");
-        self.emit(&[0x2A]); // LD HL, (FUNC_MINMAX)
-        self.emit_word(FUNC_MINMAX);
-        // Compare DE vs HL (signed): DE - HL
-        self.or_a_a(); //clear carry)
-        self.emit(&[0xED, 0x52]); // SBC HL, DE (HL = HL - DE)
-        // If HL > 0 (was bigger), DE is smaller, update
-        self.emit(&[0xFA]); // JP M, pf_min_skip (HL negative = DE was bigger)
-        self.fixup("pf_min_skip");
-        self.emit(&[0xED, 0x53]); // LD (FUNC_MINMAX), DE
-        self.emit_word(FUNC_MINMAX);
-        self.label("pf_min_skip");
-        self.pop_bc();
-        self.pop_de(); //restore sum)
+        self.pop_bc(); // restore row counter
+        // bcd_cmp returns C if (DE) < (HL), so check if FUNC_BCD2 < FUNC_BCD
+        self.emit(&[0x21]); // LD HL, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD2
+        self.emit_word(FUNC_BCD2);
+        self.emit(&[0xCD]); // CALL bcd_cmp
+        self.fixup("bcd_cmp");
+        self.emit(&[0xD2]); // JP NC, pf_next (FUNC_BCD2 >= FUNC_BCD, don't update)
+        self.fixup("pf_next");
+        // FUNC_BCD2 < FUNC_BCD, copy FUNC_BCD2 to FUNC_BCD and sign
+        self.emit(&[0x21]); // LD HL, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD2
+        self.emit_word(FUNC_BCD2);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // Copy sign too
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN2)
+        self.emit_word(FUNC_SIGN2);
+        self.emit(&[0x32]); // LD (FUNC_SIGN), A
+        self.emit_word(FUNC_SIGN);
         self.emit(&[0xC3]); // JP pf_next
         self.fixup("pf_next");
 
-        // MAX: if DE > (FUNC_MINMAX), update
+        // MAX: if FUNC_BCD2 > FUNC_BCD, update FUNC_BCD
         self.label("pf_do_max");
-        self.emit(&[0x2A]); // LD HL, (FUNC_MINMAX)
-        self.emit_word(FUNC_MINMAX);
-        // Compare DE vs HL: if DE > HL, update
-        self.or_a_a();
-        self.emit(&[0xED, 0x52]); // SBC HL, DE (HL = HL - DE)
-        // If HL < 0 (was smaller), DE is bigger, update
-        self.emit(&[0xF2]); // JP P, pf_max_skip (HL positive = DE was smaller)
-        self.fixup("pf_max_skip");
-        self.emit(&[0xED, 0x53]); // LD (FUNC_MINMAX), DE
-        self.emit_word(FUNC_MINMAX);
-        self.label("pf_max_skip");
-        self.pop_bc();
-        self.pop_de();
-        self.emit(&[0xC3]); // JP pf_next
+        self.pop_bc(); // restore row counter
+        // bcd_cmp returns C if (DE) < (HL), so check if FUNC_BCD < FUNC_BCD2 (i.e., FUNC_BCD2 > FUNC_BCD)
+        self.emit(&[0x21]); // LD HL, FUNC_BCD2
+        self.emit_word(FUNC_BCD2);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0xCD]); // CALL bcd_cmp
+        self.fixup("bcd_cmp");
+        self.emit(&[0xD2]); // JP NC, pf_next (FUNC_BCD >= FUNC_BCD2, don't update)
+        self.fixup("pf_next");
+        // FUNC_BCD < FUNC_BCD2, so FUNC_BCD2 is larger - copy FUNC_BCD2 to FUNC_BCD and sign
+        self.emit(&[0x21]); // LD HL, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD2
+        self.emit_word(FUNC_BCD2);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // Copy sign too
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN2)
+        self.emit_word(FUNC_SIGN2);
+        self.emit(&[0x32]); // LD (FUNC_SIGN), A
+        self.emit_word(FUNC_SIGN);
+        self.emit(&[0xC3]); // JP pf_next (skip pf_skip to avoid double BC pop)
         self.fixup("pf_next");
 
         self.label("pf_skip");
-        // Not a number - skip
+        // Not a number - skip (just restore BC)
         self.pop_bc();
-        self.pop_de();
 
         self.label("pf_next");
-        // Check if done (C > row2)
-        self.ld_a_c(); //current row)
-        self.ld_b_a(); //save in B)
+        // Increment row first, then check if done with column (C > row2)
+        self.inc_c();
+        self.ld_a_c(); // current row (after increment)
+        self.ld_b_a(); // save in B
         self.emit(&[0x3A]); // LD A, (RANGE_ROW2)
         self.emit_word(RANGE_ROW2);
         self.emit(&[0xB8]); // CP B
-        self.emit(&[0xDA]); // JP C, pf_done (row2 < current = done)
+        self.emit(&[0xDA]); // JP C, pf_next_col (row2 < current = done with this column)
+        self.fixup("pf_next_col");
+        self.emit(&[0xC3]); // JP pf_row_loop
+        self.fixup("pf_row_loop");
+
+        // Move to next column
+        self.label("pf_next_col");
+        // Increment column first, then check if done (current_col > col2)
+        self.emit(&[0x3A]); // LD A, (RANGE_CUR_COL)
+        self.emit_word(RANGE_CUR_COL);
+        self.inc_a();
+        self.emit(&[0x32]); // LD (RANGE_CUR_COL), A
+        self.emit_word(RANGE_CUR_COL);
+        self.ld_b_a(); // save incremented value in B
+        self.emit(&[0x3A]); // LD A, (RANGE_COL2)
+        self.emit_word(RANGE_COL2);
+        self.emit(&[0xB8]); // CP B
+        self.emit(&[0xDA]); // JP C, pf_done (col2 < current = done)
         self.fixup("pf_done");
-        self.inc_c();
-        self.emit(&[0xC3]); // JP pf_loop
-        self.fixup("pf_loop");
+        // Continue to next column (already incremented above)
+        self.emit(&[0xC3]); // JP pf_col_loop
+        self.fixup("pf_col_loop");
 
         // Return result based on function type
+        // Result must go in BCD_TEMP1 for consistency with parse_operand
         self.label("pf_done");
         self.emit(&[0x3A]); // LD A, (FUNC_TYPE)
         self.emit_word(FUNC_TYPE);
 
-        // SUM (0): return sum in DE
+        // SUM (0): copy FUNC_BCD to BCD_TEMP1, FUNC_SIGN to TEMP1 (for eval_expr)
         self.or_a_a();
         self.emit(&[0xC2]); // JP NZ, pf_not_sum
         self.fixup("pf_not_sum");
-        self.ex_de_hl();
-        self.or_a_a(); //clear carry)
+        // bcd_copy copies from (DE) to (HL)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1 (dest)
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD (src)
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // Copy sign to TEMP1 (where eval_expr expects it)
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN)
+        self.emit_word(FUNC_SIGN);
+        self.emit(&[0x32]); // LD (TEMP1), A
+        self.emit_word(TEMP1);
+        self.or_a_a(); // clear carry
         self.ret();
 
-        // AVG (1): return sum / count
+        // AVG (1): FUNC_BCD / count -> BCD_TEMP1
         self.label("pf_not_sum");
         self.emit(&[0xFE, 0x01]); // CP 1
         self.emit(&[0xC2]); // JP NZ, pf_not_avg
         self.fixup("pf_not_avg");
-        // HL = sum (in DE), divide by count
-        self.ex_de_hl(); //sum in HL)
-        self.emit(&[0xED, 0x5B]); // LD DE, (FUNC_COUNT)
-        self.emit_word(FUNC_COUNT);
-        // Check for divide by zero
-        self.ld_a_d();
-        self.emit(&[0xB3]); // OR E
-        self.emit(&[0xC2]); // JP NZ, pf_div_ok
-        self.fixup("pf_div_ok");
-        self.emit(&[0x21, 0x00, 0x00]); // LD HL, 0
-        self.or_a_a();
-        self.ret();
-        self.label("pf_div_ok");
-        // HL / DE -> HL (simple unsigned division)
-        self.emit(&[0xCD]); // CALL div16
-        self.fixup("div16");
-        self.or_a_a();
-        self.ret();
-
-        // MIN (2) or MAX (3): return FUNC_MINMAX
-        self.label("pf_not_avg");
-        self.emit(&[0xFE, 0x02]); // CP 2
-        self.emit(&[0xCA]); // JP Z, pf_ret_minmax
-        self.fixup("pf_ret_minmax");
-        self.emit(&[0xFE, 0x03]); // CP 3
-        self.emit(&[0xCA]); // JP Z, pf_ret_minmax
-        self.fixup("pf_ret_minmax");
-
-        // COUNT (4): return count
+        // Copy FUNC_BCD to BCD_TEMP1 (dividend)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // Convert count to BCD in BCD_TEMP2
         self.emit(&[0x2A]); // LD HL, (FUNC_COUNT)
         self.emit_word(FUNC_COUNT);
+        // Check for divide by zero
+        self.emit(&[0x7C]); // LD A, H
+        self.emit(&[0xB5]); // OR L
+        self.emit(&[0xC2]); // JP NZ, pf_avg_div
+        self.fixup("pf_avg_div");
+        // Division by zero - zero the result (positive)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        self.xor_a();
+        self.emit(&[0x32]); // LD (TEMP1), A (positive)
+        self.emit_word(TEMP1);
+        self.or_a_a();
+        self.ret();
+        self.label("pf_avg_div");
+        // For AVG: divide sum by count (no ×100 scaling needed)
+        // Convert count (in L) to BCD and store in BCD_TEMP2 byte 3 (LSB)
+        self.emit(&[0x7D]); // LD A, L (count, assuming < 100)
+        // Convert to BCD: tens in high nibble, ones in low nibble
+        self.emit(&[0x06, 0x00]); // LD B, 0 (tens counter)
+        self.label("pf_cvt_tens");
+        self.emit(&[0xFE, 10]); // CP 10
+        self.emit(&[0xDA]); // JP C, pf_cvt_done (< 10)
+        self.fixup("pf_cvt_done");
+        self.emit(&[0xD6, 10]); // SUB 10
+        self.inc_b();
+        self.emit(&[0xC3]); // JP pf_cvt_tens
+        self.fixup("pf_cvt_tens");
+        self.label("pf_cvt_done");
+        // A = ones, B = tens
+        self.emit(&[0x4F]); // LD C, A (ones)
+        self.ld_a_b(); // tens
+        self.emit(&[0x07]); // RLCA ×4
+        self.emit(&[0x07]);
+        self.emit(&[0x07]);
+        self.emit(&[0x07]);
+        self.emit(&[0xB1]); // OR C
+        // A = BCD of count, store in BCD_TEMP2 byte 3 (LSB)
+        self.push_af(); // save BCD count
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2
+        self.emit_word(BCD_TEMP2);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        self.pop_af();
+        self.emit(&[0x21]); // LD HL, BCD_TEMP2+3 (LSB)
+        self.emit_word(BCD_TEMP2 + 3);
+        self.emit(&[0x77]); // LD (HL), A
+        // BCD_TEMP2 = count as BCD (e.g., 3 -> 00 00 00 03)
+        // Call bcd_div_noscale: BCD_TEMP1 / BCD_TEMP2 -> BCD_TEMP1 (no ×100)
+        self.emit(&[0xCD]); // CALL bcd_div_noscale
+        self.fixup("bcd_div_noscale");
+        // Copy sign to TEMP1 (AVG sign = SUM sign since count is positive)
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN)
+        self.emit_word(FUNC_SIGN);
+        self.emit(&[0x32]); // LD (TEMP1), A
+        self.emit_word(TEMP1);
         self.or_a_a();
         self.ret();
 
-        self.label("pf_ret_minmax");
-        self.emit(&[0x2A]); // LD HL, (FUNC_MINMAX)
-        self.emit_word(FUNC_MINMAX);
+        // MIN (2) or MAX (3): copy FUNC_BCD to BCD_TEMP1
+        self.label("pf_not_avg");
+        self.emit(&[0xFE, 0x02]); // CP 2
+        self.emit(&[0xCA]); // JP Z, pf_ret_bcd
+        self.fixup("pf_ret_bcd");
+        self.emit(&[0xFE, 0x03]); // CP 3
+        self.emit(&[0xCA]); // JP Z, pf_ret_bcd
+        self.fixup("pf_ret_bcd");
+
+        // COUNT (4): convert count to BCD in BCD_TEMP1
+        self.emit(&[0x2A]); // LD HL, (FUNC_COUNT)
+        self.emit_word(FUNC_COUNT);
+        // Convert to BCD (same as above, but put in byte 2 for display as X.00)
+        self.emit(&[0x7D]); // LD A, L
+        self.emit(&[0x06, 0x00]); // LD B, 0 (tens)
+        self.label("pf_cnt_cvt");
+        self.emit(&[0xFE, 10]); // CP 10
+        self.emit(&[0xDA]); // JP C, pf_cnt_done
+        self.fixup("pf_cnt_done");
+        self.emit(&[0xD6, 10]); // SUB 10
+        self.inc_b();
+        self.emit(&[0xC3]); // JP pf_cnt_cvt
+        self.fixup("pf_cnt_cvt");
+        self.label("pf_cnt_done");
+        self.emit(&[0x4F]); // LD C, A (ones)
+        self.ld_a_b();
+        self.emit(&[0x07]); // RLCA ×4
+        self.emit(&[0x07]);
+        self.emit(&[0x07]);
+        self.emit(&[0x07]);
+        self.emit(&[0xB1]); // OR C
+        // A = BCD of count, store as count.00
+        self.push_af();
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0xCD]); // CALL bcd_zero
+        self.fixup("bcd_zero");
+        self.pop_af();
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1+2
+        self.emit_word(BCD_TEMP1 + 2);
+        self.emit(&[0x77]); // LD (HL), A
+        // COUNT is always positive
+        self.xor_a();
+        self.emit(&[0x32]); // LD (TEMP1), A
+        self.emit_word(TEMP1);
         self.or_a_a();
         self.ret();
 
-        // 16-bit division: HL / DE -> HL (quotient), remainder discarded
+        // pf_ret_bcd: copy FUNC_BCD to BCD_TEMP1 for MIN/MAX result
+        self.label("pf_ret_bcd");
+        // bcd_copy copies from (DE) to (HL)
+        self.emit(&[0x21]); // LD HL, BCD_TEMP1 (dest)
+        self.emit_word(BCD_TEMP1);
+        self.emit(&[0x11]); // LD DE, FUNC_BCD (src)
+        self.emit_word(FUNC_BCD);
+        self.emit(&[0xCD]); // CALL bcd_copy
+        self.fixup("bcd_copy");
+        // Copy sign to TEMP1 for MIN/MAX result
+        self.emit(&[0x3A]); // LD A, (FUNC_SIGN)
+        self.emit_word(FUNC_SIGN);
+        self.emit(&[0x32]); // LD (TEMP1), A
+        self.emit_word(TEMP1);
+        self.or_a_a();
+        self.ret();
+
+        // 16-bit division (legacy, may be unused): HL / DE -> HL (quotient)
         self.label("div16");
         self.emit(&[0x01, 0x00, 0x00]); // LD BC, 0 (quotient)
         self.label("div16_loop");
@@ -3320,6 +4332,113 @@ impl SpreadsheetCodeGen {
         self.pop_hl(); //restore original value)
         self.emit(&[0xC3]); // JP print_int
         self.fixup("print_int");
+
+        // Print BCD value from INPUT_BUF (right-aligned in CELL_WIDTH-2 = 7 chars)
+        // INPUT_BUF contains "XXXXXX.XX" (9 chars: 6 whole + '.' + 2 frac)
+        // Skip leading zeros in whole part (positions 0-4), keep at least pos 5
+        // Minimum display: "X.XX" (4 chars)
+        // print_bcd_cell_signed: Print BCD with sign support
+        // Input: C = sign (0x00 positive, 0x80 negative), ASCII in INPUT_BUF
+        self.label("print_bcd_cell_signed");
+        self.ld_a_c();
+        self.or_a_a();
+        self.emit(&[0xCA]); // JP Z, print_bcd_cell (positive)
+        self.fixup("print_bcd_cell");
+        // Negative - need to handle minus sign
+        // Scan for leading zeros first
+        self.emit(&[0x21]); // LD HL, INPUT_BUF
+        self.emit_word(INPUT_BUF);
+        self.emit(&[0x06, 5]); // LD B, 5
+        self.label("skip_zeros_neg");
+        self.ld_a_hl_ind();
+        self.emit(&[0xFE, b'0']);
+        self.emit(&[0xC2]); // JP NZ, skip_zeros_neg_done
+        self.fixup("skip_zeros_neg_done");
+        self.inc_hl();
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("skip_zeros_neg");
+        self.label("skip_zeros_neg_done");
+        // Calculate chars: 4 + B
+        self.ld_a_b();
+        self.emit(&[0xC6, 4]); // ADD A, 4
+        self.inc_a(); // +1 for minus sign
+        self.ld_b_a(); // B = total length with minus
+        // Padding: CELL_WIDTH-2 - length
+        self.emit(&[0x3E, CELL_WIDTH - 2]); // LD A, 7
+        self.emit(&[0x90]); // SUB B
+        self.emit(&[0xDA]); // JP C, print_neg_no_pad
+        self.fixup("print_neg_no_pad");
+        self.emit(&[0xCA]); // JP Z, print_neg_no_pad
+        self.fixup("print_neg_no_pad");
+        // Print padding
+        self.push_hl();
+        self.ld_b_a();
+        self.label("print_neg_pad");
+        self.emit(&[0x3E, b' ']);
+        self.emit(&[0xCD]); // CALL putchar
+        self.fixup("putchar");
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("print_neg_pad");
+        self.pop_hl();
+        self.label("print_neg_no_pad");
+        // Print minus sign
+        self.emit(&[0x3E, b'-']);
+        self.emit(&[0xCD]); // CALL putchar
+        self.fixup("putchar");
+        // Print digits
+        self.emit(&[0xCD]); // CALL print_string
+        self.fixup("print_string");
+        self.ret();
+
+        self.label("print_bcd_cell");
+        // Scan INPUT_BUF positions 0-4 for leading zeros
+        self.emit(&[0x21]); // LD HL, INPUT_BUF
+        self.emit_word(INPUT_BUF);
+        self.emit(&[0x06, 5]); // LD B, 5 (max zeros to skip in positions 0-4)
+        self.label("skip_zeros_loop");
+        self.ld_a_hl_ind();
+        self.emit(&[0xFE, b'0']); // CP '0'
+        self.emit(&[0xC2]); // JP NZ, skip_zeros_done (found non-zero)
+        self.fixup("skip_zeros_done");
+        self.inc_hl();
+        self.emit(&[0x10]); // DJNZ skip_zeros_loop
+        self.emit_relative("skip_zeros_loop");
+        // If we get here, positions 0-4 were all zeros, HL points to position 5
+
+        self.label("skip_zeros_done");
+        // HL points to first significant digit (or position 5 if all zeros)
+        // Calculate chars to print: 9 - skipped = 9 - (5 - B) = 4 + B
+        self.ld_a_b();
+        self.emit(&[0xC6, 4]); // ADD A, 4 = chars to print
+        self.ld_b_a(); // B = length of number to print
+        // Calculate padding: CELL_WIDTH-2 - length
+        self.emit(&[0x3E, CELL_WIDTH - 2]); // LD A, 7
+        self.emit(&[0x90]); // SUB B
+        self.emit(&[0xDA]); // JP C, print_bcd_no_pad (length > 7)
+        self.fixup("print_bcd_no_pad");
+        self.emit(&[0xCA]); // JP Z, print_bcd_no_pad (length == 7)
+        self.fixup("print_bcd_no_pad");
+        // A = padding spaces needed
+        self.push_hl(); // save start of significant digits
+        self.ld_b_a();
+        self.label("print_bcd_pad_loop");
+        self.emit(&[0x3E, b' ']); // LD A, ' '
+        self.emit(&[0xCD]); // CALL putchar
+        self.fixup("putchar");
+        self.emit(&[0x10]); // DJNZ
+        self.emit_relative("print_bcd_pad_loop");
+        self.pop_hl();
+        self.emit(&[0xC3]); // JP print_bcd_digits
+        self.fixup("print_bcd_digits");
+
+        self.label("print_bcd_no_pad");
+        // No padding needed, HL already points to start
+
+        self.label("print_bcd_digits");
+        // Print the number from HL (first significant digit)
+        self.emit(&[0xCD]); // CALL print_string
+        self.fixup("print_string");
+        self.ret();
     }
 
     /// String constants
@@ -3374,12 +4493,12 @@ mod tests {
     #[test]
     fn test_cell_address_calculation() {
         // Cell (0,0) should be at CELL_DATA
-        // Cell (1,0) should be at CELL_DATA + 4
-        // Cell (0,1) should be at CELL_DATA + 64
-        // Formula: CELL_DATA + (row * 16 + col) * 4
+        // Cell (1,0) should be at CELL_DATA + 6
+        // Cell (0,1) should be at CELL_DATA + 96
+        // Formula: CELL_DATA + (row * 16 + col) * 6
         let base = CELL_DATA;
-        assert_eq!(base + (0 * 16 + 0) * 4, 0x2000);
-        assert_eq!(base + (0 * 16 + 1) * 4, 0x2004);
-        assert_eq!(base + (1 * 16 + 0) * 4, 0x2040);
+        assert_eq!(base + (0 * 16 + 0) * 6, 0x2000);
+        assert_eq!(base + (0 * 16 + 1) * 6, 0x2006);
+        assert_eq!(base + (1 * 16 + 0) * 6, 0x2060);
     }
 }
