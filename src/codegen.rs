@@ -28,7 +28,6 @@ const STACK_TOP: u16 = 0x37FF;
 // RAM layout
 const CELL_DATA: u16 = 0x2000;      // 4KB for cells
 const INPUT_BUF: u16 = 0x3000;      // 256 bytes
-const DISPLAY_BUF: u16 = 0x3100;    // 256 bytes
 const SCRATCH: u16 = 0x3200;        // 1KB scratch/formula
 
 // Spreadsheet state
@@ -42,7 +41,6 @@ const EDIT_MODE: u16 = 0x35F6;      // 0=navigate, 1=edit
 const TEMP1: u16 = 0x35F8;          // Temp storage
 const TEMP2: u16 = 0x35FA;          // Temp storage
 const FORMULA_PTR: u16 = 0x35FC;    // Next free position in formula storage
-const RECALC_FLAG: u16 = 0x35FE;    // Force recalculation flag
 const COL_WIDTH_VAR: u16 = 0x35FF;  // Column width (default 9)
 const RANGE_ROW2: u16 = 0x3600;     // Range function end row
 const FUNC_TYPE: u16 = 0x3601;      // Function type: 0=SUM, 1=AVG, 2=MIN, 3=MAX, 4=COUNT
@@ -50,8 +48,6 @@ const FUNC_COUNT: u16 = 0x3602;     // Cell count for AVG
 const FUNC_MINMAX: u16 = 0x3604;    // Min/max accumulator (16-bit)
 
 // Display constants
-const SCREEN_COLS: u8 = 80;         // Terminal width
-const SCREEN_ROWS: u8 = 24;         // Terminal height
 const CELL_WIDTH: u8 = 9;           // Width per cell display
 const VISIBLE_COLS: u8 = 8;         // Columns visible at once
 const VISIBLE_ROWS: u8 = 10;        // Rows visible at once
@@ -63,14 +59,12 @@ const HEADER_ROW: u8 = 4;           // Column headers (A B C D...)
 const DATA_ROW: u8 = 5;             // First data row
 const STATUS_ROW: u8 = 15;          // Status line (after 10 data rows)
 const INPUT_ROW: u8 = 16;           // Input prompt row
-const ROW_NUM_WIDTH: u8 = 5;        // Width for row numbers (space + 4 digits)
 
 // Grid size
 const GRID_COLS: u8 = 16;           // A-P
 const GRID_ROWS: u8 = 64;           // 1-64
 
 // Cell types
-const CELL_EMPTY: u8 = 0;
 const CELL_NUMBER: u8 = 1;
 const CELL_FORMULA: u8 = 2;
 const CELL_ERROR: u8 = 3;
