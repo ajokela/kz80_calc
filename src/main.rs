@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::process;
 
-use kz80_calc::CodeGen;
+use kz80_calc::SpreadsheetCodeGen;
 
 fn print_help() {
     eprintln!("kz80_calc - VisiCalc-style spreadsheet for Z80");
@@ -49,7 +49,7 @@ fn main() {
     }
 
     // Generate the spreadsheet ROM
-    let mut codegen = CodeGen::new();
+    let mut codegen = SpreadsheetCodeGen::new();
     codegen.generate();
     let rom = codegen.into_rom();
 

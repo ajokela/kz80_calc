@@ -1,2 +1,16 @@
+# Build artifacts
 /target/
-0x0000
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude
+CLAUDE.md
+
+# Generated binaries
+*.bin
